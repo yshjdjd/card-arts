@@ -52,9 +52,23 @@ npm run dev        # http://localhost:5173
 
 `vite.config.ts` 已把 `/api` 与 `/game-icons` 代理到 8000。
 
+### 3.配置模型
+
+进入项目，配置项目专属的大模型，兼容OPENAI接口，可开启联网功能和深度思考功能，并且可以设计文档和基础skill功能。利用内部后端同步启动的本地mcp服务器操作内部工具。
 ---
 
 ## 功能清单
+素材库模块添加插图，图标等素材
+<img width="1892" height="913" alt="屏幕截图 2026-10-17 194433" src="https://github.com/user-attachments/assets/60318709-b486-4590-8a8e-1175def47efc" />
+
+输入设计需求
+<img width="942" height="757" alt="屏幕截图 2026-10-17 205356" src="https://github.com/user-attachments/assets/c7f4beb3-df45-49a8-a3a1-eaa5d7185c97" />
+
+快速工具调用实现
+<img width="1896" height="851" alt="屏幕截图 2026-10-17 210614" src="https://github.com/user-attachments/assets/2a9f6863-c8f1-4dd2-b867-53526648b49b" />
+<img width="1902" height="833" alt="屏幕截图 2026-10-17 210609" src="https://github.com/user-attachments/assets/d3773a2e-74f4-48f3-87a4-e8248bca8fef" />
+<img width="1893" height="857" alt="屏幕截图 2026-10-17 210623" src="https://github.com/user-attachments/assets/c3682286-728e-4cf2-acd0-b0b04c0b9d19" />
+
 
 ### 项目与数据
 
