@@ -1,7 +1,6 @@
 # CardArts
 
 本地优先（local-first）的卡牌 / 桌游设计工具，前后端分离架构。
-由 `lab.ludloom.com` 的功能逆向分析后**完整重写**，项目名由 Ludloom 改为 **CardArts**。
 
 ```
 card_arts/
