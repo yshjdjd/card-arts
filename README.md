@@ -330,6 +330,5 @@ MCP_TRANSPORT=streamable-http MCP_PORT=8765 python -m app.mcp.server
 
 ## 备注
 
-- 原 `ludloom-next/` 是改名前的骨架版本，已被本目录取代，可忽略。
 - 图标版权：game-icons.net，CC BY 3.0（`data/game-icons/LICENSE.txt`）。
 - 想整体搬迁：拷走 `data/`（服务端数据）+ `workspace/`（文件镜像）即可，或设置 `CARDARTS_DATA_DIR`。
