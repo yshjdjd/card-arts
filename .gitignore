@@ -1,0 +1,31 @@
+# ---- dependencies ----
+frontend/node_modules/
+.venv/
+venv/
+
+# ---- build output ----
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+
+# ---- runtime data (bundled icon library is committed) ----
+data/card_arts.db
+data/card_arts.db-*
+data/objects/
+data/uploads/
+
+# ---- local file workspace (user projects / assets) ----
+workspace/
+
+# ---- env & secrets ----
+.env
+.env.*
+
+# ---- misc ----
+*.log
+.DS_Store
+Thumbs.db
+.test-results/

@@ -1,0 +1,30 @@
+{
+  "name": "card-arts-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --pretty",
+    "test:agent": "node test_agent_protocol.mjs && node test_agent_runtime.mjs && node test_thinking.mjs",
+    "test:documents": "node test_document_drafts.mjs",
+    "test:design": "node test_design_tools.mjs"
+  },
+  "dependencies": {
+    "dexie": "^4.0.11",
+    "dexie-react-hooks": "^1.1.7",
+    "jszip": "^3.10.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
