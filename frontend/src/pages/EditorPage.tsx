@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useProject, useAssets } from '../state/store';
 import { useToast, useConfirm, Modal, Select, NumberInput, ColorInput, Empty } from '../components/ui';
+import { AssetField, uploadImageFiles } from '../components/AssetPicker';
 import type { Card, Deck, ElementKind, Field, Layout, LayoutElement } from '../lib/types';
 import { renderLayout, renderToCanvas, type ImageLike } from '../lib/render';
 import { useLayoutImages } from '../lib/useImages';
@@ -21,7 +22,8 @@ const KIND_ICON: Record<ElementKind, string> = {
 
 export default function EditorPage() {
   const { content, update, undo, redo, canUndo, canRedo } = useProject();
-  const { assets } = useAssets();
+  const { assets, remoteId, refresh } = useAssets();
+  const { project } = useProject();
   const toast = useToast();
   const [confirmNode, ask] = useConfirm();
   const decks = content.decks ?? [];
@@ -84,7 +86,7 @@ export default function EditorPage() {
   useEffect(() => {
     if (!layout || !ready) return;
     const canvasLayout = cropDraft && cropId && !sampleCard ? { ...layout, elements: layout.elements.map((el) => el.id === cropId ? { ...el, ...cropDraft } : el) } : layout;
-    const cv = renderToCanvas(canvasLayout, cardForRender, { values: cardForRender?.values ?? {}, images, icons, scale: zoom }, deck?.fields ?? []);
+    const cv = renderToCanvas(canvasLayout, cardForRender, { values: cardForRender?.values ?? {}, images, icons, scale: zoom, placeholders: true }, deck?.fields ?? []);
     const target = canvasRef.current; if (!target) return;
     target.width = cv.width; target.height = cv.height; target.getContext('2d')?.drawImage(cv, 0, 0);
   }, [layout, cardForRender, cropDraft, cropId, images, icons, ready, zoom, deck?.fields]);
@@ -217,10 +219,39 @@ export default function EditorPage() {
   const addElement = (kind: ElementKind) => {
     const el: LayoutElement = { id: uid(), kind, name: KIND_LABEL[kind], x: 60, y: 60, width: 240, height: 120, rotation: 0, fill: ['text', 'icon'].includes(kind) ? 'transparent' : '#e5e7eb', color: '#111827' };
     if (kind === 'text') Object.assign(el, { text: '文本内容', fontSize: 32, fontFamily: String(content.settings?.defaultFont || 'sans'), wrapMode: 'word', horizontalAlign: 'center', verticalAlign: 'middle' });
-    if (kind === 'image') Object.assign(el, { imageFit: 'cover', assetId: assets.find((a) => a.kind === 'image')?.id });
+    // 没图时也要是块看得见、能拖能选的区域（渲染层会画占位框）
+    if (kind === 'image') Object.assign(el, { width: 240, height: 240, imageFit: 'cover', assetId: assets.find((a) => a.kind === 'image')?.id });
     if (kind === 'icon') Object.assign(el, { iconId: 'delapouite/sword-altar', width: 96, height: 96 });
     if (kind === 'line') Object.assign(el, { height: 4, fill: '#111827', borderWidth: 2 });
     void patchLayout((l) => { l.elements.push(el); }, '新增元素'); setSelected([el.id]);
+  };
+
+  /**
+   * 把图片文件拖到画布上：落在插图框里就替换它的图，
+   * 落在空处就新建一个插图框并在原位置摆好。
+   * 这是「插图框 = 可以往里放图的区域」最直观的那一步。
+   */
+  const dropImages = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+    if (!files.length || !layout) return;
+    const ids = await uploadImageFiles(files, { projectId: project?.id ?? '', remoteId, refresh });
+    if (!ids.length) { toast('图片上传失败', 'err'); return; }
+    const p = point(e);
+    const hit = [...layout.elements].reverse().find((el) => el.kind === 'image' && !el.locked && hitElement(el, p.x, p.y));
+    if (hit) {
+      await patchElement(hit.id, { assetId: ids[0] }, '插图框换图');
+      setSelected([hit.id]);
+      toast(`「${hit.name}」已换成新图`, 'ok');
+      return;
+    }
+    const el: LayoutElement = {
+      id: uid(), kind: 'image', name: '插图框', x: p.x, y: p.y, width: 240, height: 240,
+      rotation: 0, fill: '#e5e7eb', color: '#111827', imageFit: 'cover', assetId: ids[0],
+    };
+    await patchLayout((l) => { l.elements.push(el); }, '拖入图片');
+    setSelected([el.id]);
+    toast('已插入插图框', 'ok');
   };
   const check = async () => {
     if (!layout || !ready) return;
@@ -282,7 +313,14 @@ export default function EditorPage() {
         listen((event) => { wrap.scrollLeft = left - (event.clientX - x); wrap.scrollTop = top - (event.clientY - y); }, () => {});
       }}>
         {!layout ? <Empty icon="✏️" text="这一面还没有版式" action={<button className="btn primary" onClick={() => void patchLayout(() => {})}>创建版式</button>} /> :
-          <div ref={stageRef} className="canvas-stage" tabIndex={0} aria-label="卡牌版式画布" style={{ width: layout.width * zoom, height: layout.height * zoom }} onMouseDown={(e) => startGesture(e)} onDoubleClick={(e) => { const p = point(e); const el = [...layout.elements].reverse().find((el) => el.kind === 'image' && !el.locked && hitElement(el, p.x, p.y)); if (el) { setSelected([el.id]); setCropId(el.id); } }}>
+          <div
+            ref={stageRef} className="canvas-stage" tabIndex={0} aria-label="卡牌版式画布"
+            style={{ width: layout.width * zoom, height: layout.height * zoom }}
+            onMouseDown={(e) => startGesture(e)}
+            onDoubleClick={(e) => { const p = point(e); const el = [...layout.elements].reverse().find((el) => el.kind === 'image' && !el.locked && hitElement(el, p.x, p.y)); if (el) { setSelected([el.id]); setCropId(el.id); } }}
+            onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
+            onDrop={(e) => { void dropImages(e); }}
+          >
             <canvas ref={canvasRef} style={{ width: layout.width * zoom, height: layout.height * zoom }} />
             {showSafe && <div style={{ pointerEvents: 'none', position: 'absolute', inset: `${3 * (layout.width / (layout.widthMm || 63.5)) * zoom}px`, border: '1px dashed #16a34a' }} title="3mm 安全区" />}
             {guides.map((g) => <div key={g.axis} style={{ position: 'absolute', pointerEvents: 'none', background: '#f43f5e', ...(g.axis === 'x' ? { left: g.value * zoom, top: 0, width: 1, height: '100%' } : { top: g.value * zoom, left: 0, height: 1, width: '100%' }) }} />)}
@@ -306,7 +344,7 @@ export default function EditorPage() {
 }
 function CardThumbnail({ layout, card, fields, images, icons }: { layout: Layout; card: Card; fields: Field[]; images: Record<string, ImageLike>; icons: Record<string, ImageLike> }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => { const cv = renderToCanvas(layout, card, { values: card.values, images, icons, scale: 180 / layout.width }, fields); const target = ref.current; if (target) { target.width = cv.width; target.height = cv.height; target.getContext('2d')?.drawImage(cv, 0, 0); } }, [layout, card, images, icons, fields]);
+  useEffect(() => { const cv = renderToCanvas(layout, card, { values: card.values, images, icons, scale: 180 / layout.width, placeholders: true }, fields); const target = ref.current; if (target) { target.width = cv.width; target.height = cv.height; target.getContext('2d')?.drawImage(cv, 0, 0); } }, [layout, card, images, icons, fields]);
   return <canvas ref={ref} style={{ width: '100%', height: 'auto' }} />;
 }
 
@@ -374,6 +412,8 @@ function ElementProps({
   const [showIcon, setShowIcon] = useState(false);
   const textFields = deck.fields ?? [];
   const imgAssets = assets.filter((a) => a.kind === 'image');
+  /** 只有 image 类型的字段才能给插图框供图 */
+  const imageFields = textFields.filter((f) => f.type === 'image');
 
   return (
     <>
@@ -471,12 +511,50 @@ function ElementProps({
 
       {el.kind === 'image' && (
         <Section title="图片">
-          <Row label="素材">
-            <select className="select" value={el.assetId ?? ''} onChange={(e) => onPatch({ assetId: e.target.value || undefined })}>
-              <option value="">未选择</option>
-              {imgAssets.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+          <Row label="来源">
+            <Select
+              value={el.fieldId ? 'field' : 'asset'}
+              onChange={(v) => onPatch(v === 'field'
+                ? { fieldId: imageFields[0]?.id, assetId: undefined }
+                : { fieldId: undefined })}
+              options={[
+                { value: 'asset', label: '固定图片' },
+                ...(imageFields.length ? [{ value: 'field', label: '按卡牌字段取图' }] : []),
+              ]}
+            />
           </Row>
+
+          {el.fieldId ? (
+            <>
+              <Row label="图片字段">
+                <select className="select" value={el.fieldId} onChange={(e) => onPatch({ fieldId: e.target.value || undefined })}>
+                  {imageFields.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                </select>
+              </Row>
+              <div className="small faint">
+                绑定后每张卡可以在「卡牌数据」里各自选图；卡片没填时回退到下面这张固定图片。
+                {!imageFields.length && ' 当前牌组还没有 image 类型字段，请先到牌组页新增。'}
+              </div>
+              <div style={{ marginTop: 8 }}>
+                <AssetField
+                  label="默认图片" value={el.assetId}
+                  onChange={(id) => onPatch({ assetId: id || undefined })}
+                />
+              </div>
+            </>
+          ) : (
+            <div style={{ padding: '4px 0' }}>
+              <AssetField
+                label="选择素材或上传图片" value={el.assetId}
+                onChange={(id) => onPatch({ assetId: id || undefined })}
+              />
+            </div>
+          )}
+
+          {!el.assetId && !el.fieldId && (
+            <div className="small warn">还没选图：画布上会显示空的插图框占位，选好素材后即显示图片。</div>
+          )}
+
           <Row label="填充">
             <Select
               value={el.imageFit ?? 'cover'}

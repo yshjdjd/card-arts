@@ -74,7 +74,9 @@ export const TOOL_SPECS: ToolSpec[] = [
   { name: 'doc.read', level: 'read', doc: 'doc.read {doc(必填),offset?,limit?} → 按字符分页读文档；offset 从 0 起，默认读 2500 字符；按返回的 nextOffset 继续，表格可用 doc.tableRead' },
   { name: 'font.list', level: 'read', doc: 'font.list {} → 列出系统字体与项目已上传字体（key、名称）；使用前先查，不能编造字体 key' },
   { name: 'font.set', level: 'write', doc: 'font.set {font,deck?,side?,element?,setDefault?} → 设定字体；font 用 font.list 返回的 key 或精确名称；有 element 时只改该文字；有 deck 时改该牌组，否则改项目全部文字；side: front/back/both，默认 both；setDefault:true 同时设为新建文字默认字体' },
-  { name: 'asset.list', level: 'read', doc: 'asset.list {limit?} → 列出素材库' },
+  { name: 'asset.list', level: 'read', doc: 'asset.list {limit?,kind?} → 列出素材库（kind=image/font 可只看图片或字体）' },
+  { name: 'asset.import', level: 'write', doc: 'asset.import {url,name?} → 由后端抓取外链图片存进素材库，返回可直接使用的素材 id' },
+  { name: 'asset.use', level: 'write', doc: 'asset.use {asset,deck?,side?,element?,name?,x?,y?,width?,height?,imageFit?} → 把素材放进版式：给 element 就替换该插图框的图，否则新建插图框' },
   { name: 'asset.rename', level: 'write', doc: 'asset.rename {asset,name} → 素材改名' },
   { name: 'asset.delete', level: 'destructive', doc: 'asset.delete {asset} → 删除素材' },
   // 结构化表格
@@ -209,6 +211,9 @@ export function buildSystemPrompt(snapshotOrParts: string | PromptParts): string
     '11. 规则文字可用 richText:true 和 **粗体**、*斜体*、[color=#dc2626]文字[/color]、[size=36]文字[/size]、[icon:真实图标id]、[image:真实素材id]；需保留绑定字段。',
     '9. 文档分两类，工具别混用：📝文本用 doc.create / doc.update / doc.append；📊表格用 doc.createTable / doc.tableSet / doc.tableAddRow。',
     '   拿 doc.update 改表格正文界面上不会有任何变化；doc.update / doc.append / doc.delete 的 doc 参数必填，不给就先 doc.list 查。',
+    '12. 插图相关：image 元素的图只能来自素材库，assetId 必须是 asset.list / 项目概览里真实存在的 id。',
+    '   库里没有合适的图时，请用户在素材库上传，或联网时用 asset.import 按 URL 导入拿到 id，再 asset.use 放进版式。',
+    '   想让每张卡用不同图，就把插图框的 fieldId 绑到 image 类型字段，再用 card.set 给各卡分别赋素材 id。',
     p.extra ? `\n## 用户附加要求\n${p.extra}` : '',
   ].filter((x) => x !== undefined).join('\n');
 }

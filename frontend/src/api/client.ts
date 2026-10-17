@@ -132,6 +132,11 @@ export const api = {
   deleteAsset: (id: string) => req<void>(`/assets/${id}`, { method: 'DELETE' }),
   cropAsset: (id: string, body: Record<string, unknown>) =>
     req<{ asset: RemoteAssetDTO }>(`/assets/${id}/crop`, { method: 'POST', body: JSON.stringify(body) }),
+  /** 后端代抓外链图片入库（前端直接 fetch 会被 CORS 拦，智能体尤其需要这条） */
+  importAssetUrl: (body: { url: string; project_id: string; name?: string; folder_id?: string | null }) =>
+    req<{ asset: RemoteAssetDTO }>('/assets/import-url', {
+      method: 'POST', body: JSON.stringify(body),
+    }),
 
   /* ---------- 素材文件夹 ---------- */
   listFolders: (projectId: string) =>

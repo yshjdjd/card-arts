@@ -64,6 +64,8 @@ npm run dev        # http://localhost:5173
 | 牌组与字段 | 多牌组；字段增删改排序、6 种类型（文本/数字/图片/下拉/颜色/是否）、选项管理、是否在表格显示；6 种卡牌尺寸预设；版式复制到其他牌组 |
 | 卡牌数据表 | 内联编辑、搜索、批量复制/删除、CSV / XLSX 导入（表头自动匹配字段）与导出 |
 | 版式编辑器 | 6 种元素（文本/图片/图标/矩形/椭圆/线条）、拖拽移动与四角缩放、图层排序/锁定/隐藏、属性面板、**字段绑定 `{id}`**、**显示条件**（可嵌套条件组）、**数量展开**、样牌切换、撤销 |
+| **插图框** | 图片元素支持两种来源：**固定图**（从素材库挑或直接上传）/ **按卡牌字段取图**（绑 image 字段，每张卡各自配图，卡片没填时回退到固定图）；未选图时在画布上显示虚线占位框（不再隐形）；可直接把图片文件拖到画布上，落在插图框里就替换、落在空处就新建插图框 |
+| **卡牌配图** | 卡牌数据表里 image 类型的字段显示为缩略图，点开即可从素材库挑图或上传本地图片，存的是素材 id |
 | 素材库 | 文件夹树、拖拽上传（秒传 / 分片 / 断点续传 + 进度）、重命名、移动、删除、服务端裁切（按卡牌预设 / 自定义尺寸）、详情（尺寸/主色/sha256） |
 | **内置图标库** | 4239 个 game-icons.net 图标（CC BY 3.0）；搜索（名称/作者）、分页、颜色预览、尺寸预览、多选、**加入自建素材库文件夹并重命名**（支持名称模板 `{name}/{author}/{index}` 与逐个改名、着色、重名策略） |
 | 项目文档 | Markdown 编辑 / 分栏预览 |
@@ -154,7 +156,7 @@ versions/{项目}/{序号}-{标签}.json    最近 30 条版本快照
 
 ### 模型可以直接操作整个工程
 
-启用模型后，助手不是只能聊天——它能调用 **63 个工具**直接改工程
+启用模型后，助手不是只能聊天——它能调用 **67 个工具**直接改工程
 （`src/lib/agentTools.ts` 实现，`src/lib/agentProtocol.ts` 负责解析与调度）：
 
 | 分类 | 工具 |
@@ -168,7 +170,7 @@ versions/{项目}/{序号}-{标签}.json    最近 30 条版本快照
 | 结构化表格 | `doc.createTable` `doc.tableRead` `doc.tableFind` `doc.tableStats` `doc.tableSet` `doc.tableAddRow` `doc.tableAddColumn` `doc.tableDeleteRow` `doc.tableToCards` |
 | 联网 | `web.search` `web.fetch` |
 | 计划 | `todo.write` |
-| 素材 | `asset.list` `asset.rename` `asset.delete` |
+| 素材 | `asset.list` `asset.import`（按 URL 导入图片）`asset.use`（放进版式）`asset.rename` `asset.delete` |
 
 工作流程：
 
@@ -226,8 +228,9 @@ POST /api/v1/web/fetch    {url, max_chars?}
 
 **4. 待办**：多步骤任务会先用 `todo.write` 列计划，界面上方实时显示 `[x] 完成 / [~] 进行中 / [ ] 待办`。
 
-自检：`node frontend/test_agent_protocol.mjs`（92 项，含分级 / 并行 / 授权 / 截断 / DSML 兜底 / 上下文挂载 /
-「说明书与实现一一对应」校验）、`node frontend/test_thinking.mjs`（56 项，思考模式各厂商参数）。
+自检：`node frontend/test_agent_protocol.mjs`（89 项，含分级 / 并行 / 授权 / 截断 / DSML 兜底 / 上下文挂载 /
+「说明书与实现一一对应」校验）、`node frontend/test_thinking.mjs`（56 项，思考模式各厂商参数）、
+`node frontend/test_image_flow.mjs`（36 项，插图框占位 / 按字段取图 / 智能体读素材库 / 图片字段写入）。
 
 ### 流式输出
 
@@ -235,7 +238,8 @@ POST /api/v1/web/fetch    {url, max_chars?}
 后端 `POST /api/v1/llm/chat` 带 `stream: true` 时返回 `text/event-stream`；
 上游报错时也会补一条 `[DONE]` 收尾，前端不会干等。
 自检：`python backend/test_llm_stream.py`（19 项，含「首个分片很快到达」、
-思考参数透传、o 系列字段改名、`reasoning_content` 回传验证）。
+思考参数透传、o 系列字段改名、`reasoning_content` 回传验证）；
+`python backend/test_asset_import.py`（20 项，外链导入含 octet-stream / 302 / 非图片等各种站点行为）。
 
 后端代理接口：
 
@@ -257,6 +261,20 @@ POST /api/v1/llm/models   拉取远端模型列表
   `doc.tableSet/tableFind/tableStats/tableToCards` 用来精确改和批量导入卡牌。
 
 ---
+
+## 素材新增接口
+
+```
+POST /api/v1/assets/import-url              后端代抓外链图片入库
+```
+
+```json
+{ "project_id": "...", "url": "https://…/a.png", "name": "可选.png", "folder_id": null }
+```
+
+智能体没有浏览器环境，在前端直接 fetch 外链会被 CORS 拦掉，所以下载这一步放在后端。
+服务端会跟随 302、按 12MB 上限截断，并在 `Content-Type` 不可信时（很多站点一律返回
+`application/octet-stream`）改用扩展名 + 魔术字节判定类型，非图片直接 400 而不是留下坏素材。
 
 ## 图标库新增接口
 

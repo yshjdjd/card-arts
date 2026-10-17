@@ -486,6 +486,50 @@ table.tbl td.cell input:focus { background: var(--accent-soft); }
 .tgrid input:focus { background: var(--panel); box-shadow: inset 0 0 0 1px var(--accent); }
 .tgrid th input { font-weight: 600; }
 
+/* ---------------- 素材选择器 ---------------- */
+.apick-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 10px; max-height: 46vh; overflow: auto; padding: 2px;
+}
+.apick-item {
+  position: relative; display: flex; flex-direction: column; align-items: stretch;
+  gap: 5px; padding: 6px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); cursor: pointer; text-align: left; overflow: hidden;
+}
+.apick-item:hover { border-color: var(--accent); }
+.apick-item.on { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
+.apick-item img {
+  width: 100%; height: 76px; object-fit: contain; background: var(--panel);
+  border-radius: 5px; display: block;
+}
+.apick-name {
+  font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
+.apick-thumb {
+  position: relative; display: block; height: 92px; padding: 0;
+  border: 1px dashed var(--border); border-radius: 8px; background: var(--panel-2);
+  cursor: pointer; overflow: hidden;
+}
+.apick-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.apick-empty { display: block; line-height: 88px; font-size: 12px; color: var(--text-dim); }
+.apick-mask {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  background: rgba(0, 0, 0, .45); color: #fff; font-size: 12px;
+}
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.small.warn {
+  color: #b45309; background: #fef3c7; border-radius: var(--radius-sm);
+  padding: 6px 8px; display: block;
+}
+/* 卡牌表格里的图片单元格 */
+.cell-img {
+  width: 42px; height: 42px; padding: 0; border: 1px dashed var(--border);
+  border-radius: var(--radius-sm); background: var(--panel-2); cursor: pointer; overflow: hidden;
+}
+.cell-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cell-img span { font-size: 11px; color: var(--text-dim); }
+
 /* ---------------- 打印 ---------------- */
 
 @media print {
