@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.models.asset import Asset, UploadSession
 from app.models.asset_folder import AssetFolder
+from app.models.project import Project
 from app.services import image_processor, upload_service
 from app.services.storage import get_storage
 
@@ -165,6 +166,128 @@ async def crop_asset(asset_id: str, body: CropIn, session: AsyncSession = Depend
     )
     await session.commit()
     return {"asset": _asset_out(created)}
+
+
+# ---------------- 从 URL 导入 ----------------
+
+# 超过这个体积就不拉了，避免有人拿接口当下载器
+IMPORT_MAX_BYTES = 12 * 1024 * 1024
+IMPORT_MIME_OK = {
+    "image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml", "image/avif",
+}
+
+
+class ImportUrlIn(BaseModel):
+    url: str
+    name: str | None = None
+    project_id: str
+    folder_id: str | None = None
+
+
+@router.post("/import-url", status_code=status.HTTP_201_CREATED)
+async def import_asset_from_url(
+    body: ImportUrlIn,
+    session: AsyncSession = Depends(get_session),
+):
+    """把一张网上的图片拉下来存进素材库。
+
+    智能体没有浏览器环境，直接在前端 fetch 外链会被 CORS 拦掉，
+    所以下载这一步必须放在后端做。
+    """
+    url = (body.url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "url 必须是 http(s) 链接")
+    if not (await session.get(Project, body.project_id)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在")
+
+    try:
+        data, mime = await _download_image(url)
+    except _DownloadError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    filename = (body.name or "").strip() or _name_from_url(url)
+    mime = _mime_of(filename, mime, data)
+    if not mime:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "链接返回的不是图片")
+
+    created = await upload_service.create_from_bytes(
+        session,
+        project_id=body.project_id,
+        filename=filename,
+        mime=mime,
+        data=data,
+        folder_id=body.folder_id,
+    )
+    await session.commit()
+    return {"asset": _asset_out(created)}
+
+
+class _DownloadError(Exception):
+    pass
+
+
+async def _download_image(url: str) -> tuple[bytes, str]:
+    import httpx  # 局部导入：只有真的用到时才付出导入成本
+
+    # 本机后端不该被沙箱代理劫持（本地联调时 HTTP_PROXY 常指向 127.0.0.1）
+    async with httpx.AsyncClient(
+        timeout=25.0, follow_redirects=True, max_redirects=5, trust_env=False,
+        headers={"User-Agent": "CardArts/1.0 asset-importer"},
+    ) as cli:
+        try:
+            r = await cli.get(url)
+        except httpx.HTTPError as exc:
+            raise _DownloadError(f"下载失败：{exc}") from exc
+        if r.status_code >= 400:
+            raise _DownloadError(f"下载失败：HTTP {r.status_code}")
+        clen = r.headers.get("Content-Length")
+        if clen and clen.isdigit() and int(clen) > IMPORT_MAX_BYTES:
+            raise _DownloadError("图片太大（超过 12MB）")
+        data = r.content
+        if len(data) > IMPORT_MAX_BYTES:
+            raise _DownloadError("图片太大（超过 12MB）")
+        if not data:
+            raise _DownloadError("下载到的是空文件")
+        mime = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        return data, mime
+
+
+_EXT_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "webp": "image/webp", "gif": "image/gif", "svg": "image/svg+xml",
+    "avif": "image/avif", "bmp": "image/bmp",
+}
+
+
+def _mime_of(filename: str, mime: str, data: bytes) -> str:
+    """Content-Type 常常不可信（很多站点一律返回 octet-stream），
+    所以先看协议头，不行再看扩展名，最后看魔术字节。"""
+    m = (mime or "").lower()
+    if m in IMPORT_MIME_OK or m == "image/bmp":
+        return m
+    ext = filename.rpartition(".")[2].lower()
+    if ext in _EXT_MIME:
+        return _EXT_MIME[ext]
+    if data[:8] == b"\x89PNG\r\n\x1a\n": return "image/png"
+    if data[:3] == b"\xff\xd8\xff": return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP": return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"): return "image/gif"
+    if data[:5] == b"<?xml" or b"<svg" in data[:512]: return "image/svg+xml"
+    if data[4:8] == b"ftyp" and data[8:12] == b"avis": return "image/avif"
+    return ""
+
+
+def _name_from_url(url: str) -> str:
+    import re
+    import time as _t
+    from urllib.parse import unquote, urlparse
+
+    path = urlparse(url).path
+    base = unquote(path.rsplit("/", 1)[-1] or "")
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base)[:80]
+    if not base or "." not in base:
+        return f"imported-{int(_t.time())}.png"
+    return base
 
 
 # ---------------- 文件夹 ----------------

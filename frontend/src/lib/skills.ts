@@ -117,7 +117,9 @@ countFieldId + countMax + countSpacing + countDirection(horizontal|vertical)
 - 典型尺寸：功能图标 48~96 px（300 DPI 下），装饰性大图标可到 200 px。
 - 图标元素 kind="icon"，用 iconId 指定；若想跟随卡牌字段变化，用 fieldId 绑一个 select 字段，
   并把每个选项的图标配在字段的 optionIcons 上。
-- 需要彩色插图时用 kind="image" + assetId 指向素材库里的图片，而不是图标。`,
+- 需要彩色插图时用 kind="image" + assetId 指向素材库里的图片，而不是图标。
+- **image 的 assetId 必须是 asset.list / 项目概览里真实存在的 id**，凭空编的 id 只会留下一个空框。
+  库里没有合适的图时：请用户在「素材库」上传，或联网时用 asset.import 按 URL 导入。`,
   },
   {
     key: 'export-guide',

@@ -1,6 +1,8 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { useProject } from '../state/store';
+import { useProject, useAssets } from '../state/store';
 import { useToast, useConfirm, Modal, Select, Empty } from '../components/ui';
+import { AssetPicker } from '../components/AssetPicker';
+import { previewUrl } from '../api/uploader';
 import type { Card, Deck, Field } from '../lib/types';
 import { exportCSV, exportXLSX, parseCSV, readXLSX, guessFieldIds, rowsToCards } from '../lib/table';
 import { safeName } from '../lib/utils';
@@ -231,7 +233,34 @@ export default function CardsPage() {
 
 function CellInput({ field, value, onChange }: { field: Field; value: unknown; onChange: (v: unknown) => void }) {
   const [txt, setTxt] = useState(String(value ?? ''));
+  const [pick, setPick] = useState(false);
+  const { assets } = useAssets();
   React.useEffect(() => setTxt(String(value ?? '')), [value]);
+
+  // 图片字段：存的是素材 id，必须能直接从素材库挑 / 直接上传，
+  // 否则用户只能手抄 id——之前就是落到了下面的纯文本框。
+  if (field.type === 'image') {
+    const hit = assets.find((a) => a.id === txt);
+    return (
+      <>
+        <button
+          className="cell-img"
+          onClick={() => setPick(true)}
+          title={txt ? `更换图片（当前 ${hit?.name ?? txt}）` : '选择图片'}
+        >
+          {hit ? <img src={previewUrl(hit)} alt={hit.name} /> : <span>＋ 选图</span>}
+        </button>
+        {txt && <button className="btn ghost sm" onClick={() => onChange('')} title="清除图片">✕</button>}
+        {pick && (
+          <AssetPicker
+            kind="image" value={txt}
+            onPick={(id) => { onChange(id); setPick(false); }}
+            onClose={() => setPick(false)}
+          />
+        )}
+      </>
+    );
+  }
 
   if (field.type === 'select') {
     return (

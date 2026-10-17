@@ -45,6 +45,98 @@ export interface AgentCtx {
   setTodos?: (todos: TodoItem[]) => void | Promise<void>;
 }
 
+/* ------------------------------------------------------------------ */
+/* 素材读取                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 智能体眼里的素材：id 可直接作为 image 元素的 assetId / 图片字段的值 */
+export interface AgentAsset {
+  id: string;
+  name: string;
+  kind: 'image' | 'font';
+  mime: string;
+  size: number;
+  /** 可直接打开的 URL；本地未同步的素材为空 */
+  url: string;
+}
+
+/**
+ * 素材真正的存放位置是服务端，本地 IndexedDB 里只有「还没同步上去的那些」。
+ * 以前工具只读 db.assets，于是用户明明传了一堆图，智能体看到的却是空库，
+ * 只能凭空编 assetId。这里改成和界面同一份：优先服务端清单，失败再退本地。
+ */
+const assetCache = new Map<string, { at: number; items: AgentAsset[] }>();
+const ASSET_TTL = 20_000;
+
+export async function listProjectAssets(
+  ctx: { projectId: string },
+  opts: { force?: boolean } = {},
+): Promise<AgentAsset[]> {
+  const cached = assetCache.get(ctx.projectId);
+  if (!opts.force && cached && Date.now() - cached.at < ASSET_TTL) return cached.items;
+
+  const local = await db.projects.get(ctx.projectId);
+  const remoteId = local?.remoteId ?? ctx.projectId;
+  let items: AgentAsset[] = [];
+  try {
+    const r = await api.listAssets(remoteId);
+    items = (r.items ?? []).map((a) => ({
+      id: a.id, name: a.name, kind: a.kind, mime: a.mime, size: a.size ?? 0, url: a.url,
+    }));
+  } catch {
+    items = [];
+  }
+  if (!items.length) {
+    // 离线或还没推过服务端：用本地那份（含尚未同步的）
+    const rows = await db.assets.where('projectId').equals(ctx.projectId).toArray();
+    // 本地素材还没 URL（本体是 blob），界面靠 blob 显示，智能体知道 id 就够用了
+    items = rows.map((a) => ({
+      id: a.id, name: a.name, kind: a.kind, mime: a.mime, size: a.size ?? 0, url: '',
+    }));
+  }
+  // 本地刚传上去、还没进服务端清单的也要带上，否则刚拖进来的图智能体看不见
+  const known = new Set(items.map((a) => a.id));
+  try {
+    const pending = await db.assets.where('projectId').equals(ctx.projectId).toArray();
+    for (const a of pending) {
+      if (known.has(a.id)) continue;
+      items.push({ id: a.id, name: a.name, kind: a.kind, mime: a.mime, size: a.size ?? 0, url: '' });
+    }
+  } catch { /* 表不存在时忽略 */ }
+
+  assetCache.set(ctx.projectId, { at: Date.now(), items });
+  return items;
+}
+
+/** 素材改动后立刻失效缓存 */
+export function invalidateAssets(projectId: string): void {
+  assetCache.delete(projectId);
+}
+
+/** 素材清单的文字描述；limit 控制条数，超出的提示用 asset.list 翻 */
+export function formatAssets(assets: AgentAsset[], limit: number): string {
+  if (!assets.length) {
+    return '素材库是空的。图片需要用户在界面上传；你也可以在联网时用 asset.import 按 URL 导入一张。';
+  }
+  const shown = assets.slice(0, limit);
+  const more = assets.length - shown.length;
+  const lines = shown.map((a, i) =>
+    `${i + 1}. ${a.kind === 'font' ? '🔤' : '🖼'} ${a.name}（id=${a.id}）`
+    + `${a.size ? `，${Math.round(a.size / 1024)}KB` : ''}`
+    + `${a.url ? '' : '，尚未同步'}`);
+  if (more > 0) lines.push(`…还有 ${more} 个，用 asset.list 查看全部`);
+  return lines.join('\n');
+}
+
+async function describeAssets(ctx: { projectId: string }, limit: number): Promise<string> {
+  const assets = await listProjectAssets(ctx);
+  const images = assets.filter((a) => a.kind === 'image');
+  const fonts = assets.filter((a) => a.kind === 'font');
+  if (!assets.length) return `【素材】图 ${images.length} 个 / 字体 ${fonts.length} 个 —— ${formatAssets(assets, limit)}`;
+  const body = formatAssets(images.length ? images : assets, limit);
+  return `【素材】图 ${images.length} 个 / 字体 ${fonts.length} 个\n${body}`;
+}
+
 const norm = (v: unknown): string => String(v ?? '').trim();
 const num = (v: unknown, d = 0): number => {
   const n = Number(v);
@@ -158,6 +250,19 @@ function coerce(field: Field | undefined, raw: unknown): unknown {
     }
     default: return typeof raw === 'object' ? JSON.stringify(raw) : raw;
   }
+}
+
+/**
+ * 图片字段存的是素材 id，但模型天然会直接写素材名（"火焰纹章.png"）。
+ * 这里把名字换成 id；认不出来就原样存，界面会显示空图，错误可见好过静默错。
+ */
+async function resolveAssetRef(ctx: { projectId: string }, ref: unknown): Promise<string> {
+  const raw = typeof ref === 'object' && ref !== null ? JSON.stringify(ref) : norm(ref);
+  if (!raw) return '';
+  const assets = await listProjectAssets(ctx);
+  if (assets.some((a) => a.id === raw)) return raw;
+  const hit = selectEntity(assets, raw, (a) => a.id, (a) => a.name);
+  return hit ? hit.id : raw;
 }
 
 function resolveFieldId(deck: Deck, key: string): string | undefined {
@@ -582,6 +687,16 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
     const deckId = d.id;
     const cardId = target.id;
     const input = (a.values && typeof a.values === 'object' ? a.values : a) as Record<string, unknown>;
+    // 图片字段先把「素材名」翻成 id，避免存进去的是个渲染不出来的名字
+    const imageValues: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input)) {
+      if (['deck', 'card', 'values'].includes(k)) continue;
+      const fid = resolveFieldId(d, k);
+      if (!fid) continue;
+      if (d.fields.find((f) => f.id === fid)?.type === 'image') {
+        imageValues[fid] = await resolveAssetRef(ctx, v);
+      }
+    }
     let out = '';
     await ctx.update((cc) => {
       const deck = cc.decks.find((x) => x.id === deckId);
@@ -593,8 +708,9 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
         if (['deck', 'card', 'values'].includes(k)) continue;
         const fid = resolveFieldId(deck, k);
         if (!fid) { changed.push(`${k}(未识别)`); continue; }
-        card.values[fid] = coerce(deck.fields.find((f) => f.id === fid), v);
-        changed.push(`${deck.fields.find((f) => f.id === fid)?.name ?? k}=${JSON.stringify(card.values[fid])}`);
+        const f = deck.fields.find((x) => x.id === fid);
+        card.values[fid] = imageValues[fid] ?? coerce(f, v);
+        changed.push(`${f?.name ?? k}=${JSON.stringify(card.values[fid])}`);
       }
       out = changed.length ? `✅ 已更新卡牌：${changed.join('，')}` : '⚠️ 没有可识别的字段';
     }, '智能体：改卡牌');
@@ -986,11 +1102,8 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
   /* ---------------- 素材 ---------------- */
 
   const availableFonts = async () => {
-    const project = await db.projects.get(ctx.projectId);
-    let fonts: { id: string; name: string }[];
-    try { fonts = (await api.listAssets(project?.remoteId || ctx.projectId)).items.filter((a) => a.kind === 'font'); }
-    catch { fonts = (await db.assets.where('projectId').equals(ctx.projectId).toArray()).filter((a) => a.kind === 'font'); }
-    return [...FONTS.map((f) => ({ id: f.key, name: f.name })), ...fonts.map((f) => ({ id: fontKey(f.id), name: f.name }))];
+    const custom = (await listProjectAssets(ctx)).filter((a) => a.kind === 'font');
+    return [...FONTS.map((f) => ({ id: f.key, name: f.name })), ...custom.map((f) => ({ id: fontKey(f.id), name: f.name }))];
   };
   A['font.list'] = async () => (await availableFonts()).map((f) => `${f.name} [key=${f.id}]`).join('\n');
   A['font.set'] = async (a) => {
@@ -1018,32 +1131,105 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
     return `✅ 已将 ${targets.length} 个文字元素设为「${font.name}」${a.setDefault === true ? '，同时更新默认字体' : ''}`;
   };
 
+  const pickAsset = async (hint: unknown) => {
+    const rows = await listProjectAssets(ctx);
+    const h = norm(hint);
+    // 直接给 id 时优先精确匹配，避免同名素材选错
+    const exact = rows.find((x) => x.id === h);
+    const hit = exact ?? selectEntity(rows, h, (x) => x.id, (x) => x.name);
+    if (!hit) {
+      return { err: `❌ 找不到素材「${h}」。现有素材：${rows.slice(0, 20).map((x) => `${x.name}(${x.id})`).join('、') || '（库里没有素材）'}` } as const;
+    }
+    return { hit } as const;
+  };
+
   A['asset.list'] = async (a) => {
-    const rows = await db.assets.where('projectId').equals(ctx.projectId).toArray();
-    if (!rows.length) return '素材库还是空的（素材需要用户在界面里上传）。';
+    const rows = await listProjectAssets(ctx, { force: true });
+    const kind = norm(a.kind);
+    const picked = kind === 'image' || kind === 'font' ? rows.filter((x) => x.kind === kind) : rows;
+    if (!picked.length) {
+      return kind
+        ? `库里没有${kind === 'image' ? '图片' : '字体'}素材。图片可以请用户在素材库上传，或联网时用 asset.import 按 URL 导入。`
+        : formatAssets(rows, 8);
+    }
     const limit = Math.max(1, Math.min(200, num(a.limit, 40)));
-    return rows.slice(0, limit).map((x, i) =>
-      `${i + 1}. ${x.name}（id=${x.id}，${x.kind}，${Math.round((x.size ?? 0) / 1024)}KB${x.folderId ? `，文件夹 ${x.folderId}` : ''}）`).join('\n');
+    return formatAssets(picked, limit);
   };
 
   A['asset.rename'] = async (a) => {
-    const rows = await db.assets.where('projectId').equals(ctx.projectId).toArray();
-    const h = norm(a.asset);
-    const hit = selectEntity(rows, h, (x) => x.id, (x) => x.name);
-    if (!hit) return `❌ 找不到素材「${h}」`;
+    const got = await pickAsset(a.asset);
+    if (got.err) return got.err;
     const name = norm(a.name);
     if (!name) return '❌ 缺少 name';
-    await db.assets.update(hit.id, { name });
-    return `✅ 素材「${hit.name}」改名为「${name}」`;
+    try { await api.renameAsset(got.hit.id, name); }
+    catch { await db.assets.update(got.hit.id, { name }); }
+    invalidateAssets(ctx.projectId);
+    return `✅ 素材「${got.hit.name}」改名为「${name}」`;
   };
 
   A['asset.delete'] = async (a) => {
-    const rows = await db.assets.where('projectId').equals(ctx.projectId).toArray();
-    const h = norm(a.asset);
-    const hit = selectEntity(rows, h, (x) => x.id, (x) => x.name);
-    if (!hit) return `❌ 找不到素材「${h}」`;
-    await db.assets.delete(hit.id);
-    return `✅ 已删除素材「${hit.name}」`;
+    const got = await pickAsset(a.asset);
+    if (got.err) return got.err;
+    try { await api.deleteAsset(got.hit.id); }
+    catch { await db.assets.delete(got.hit.id); }
+    invalidateAssets(ctx.projectId);
+    return `✅ 已删除素材「${got.hit.name}」`;
+  };
+
+  /**
+   * 后端代抓外链图片入库。
+   * 智能体没有浏览器环境，前端直连外链会被 CORS 拦掉，所以下载这一步必须在后端做。
+   */
+  A['asset.import'] = async (a) => {
+    const url = norm(a.url);
+    if (!url) return '❌ 缺少 url';
+    if (!/^https?:\/\//i.test(url)) return '❌ url 必须是 http(s) 链接';
+    const local = await db.projects.get(ctx.projectId);
+    let result: { id: string; name: string };
+    try {
+      const r = await api.importAssetUrl({
+        url,
+        project_id: local?.remoteId ?? ctx.projectId,
+        ...(norm(a.name) ? { name: norm(a.name) } : {}),
+      });
+      result = { id: r.asset.id, name: r.asset.name };
+    } catch (e) {
+      return `❌ 导入失败：${(e as Error).message}（若后端未启动请开启；外链站点也可能拒绝抓取）`;
+    }
+    invalidateAssets(ctx.projectId);
+    return `✅ 已导入图片「${result.name}」到素材库（id=${result.id}）\n`
+      + `现在可以：element.update {element:<插图框>, patch:{assetId:"${result.id}"}}，`
+      + '或 card.set 给 image 字段赋这个值。';
+  };
+
+  /** 把素材放进版式：指定元素就替换它的图，否则新建一个插图框 */
+  A['asset.use'] = async (a) => {
+    const id = norm(a.asset) || norm(a.assetId);
+    if (!id) return '❌ 缺少 asset（素材 id 或名称），先用 asset.list 查';
+    // 先校验素材真的存在——凭空编 id 是最常见的失败，早失败比在画布上留个空框好
+    const got = await pickAsset(id);
+    if (got.err) return got.err;
+    return withLayout(a.deck, a.side, '使用素材', (layout, deck) => {
+    const existing = norm(a.element) ? pickElement(layout, a.element) : undefined;
+    if (norm(a.element) && !existing) return `❌ 找不到元素「${norm(a.element)}」`;
+    if (existing) {
+      if (existing.kind !== 'image') return `❌ 元素「${existing.name}」是 ${existing.kind}，不是图片元素`;
+      existing.assetId = got.hit.id;
+      if (a.imageFit) existing.imageFit = norm(a.imageFit) === 'contain' ? 'contain' : 'cover';
+      return `✅ 已把「${got.hit.name}」放进插图框「${existing.name}」（${existing.width}×${existing.height}）`;
+    }
+    const el: LayoutElement = {
+      id: uid(), kind: 'image', name: norm(a.name) || got.hit.name || '插图框',
+      x: num(a.x, 60), y: num(a.y, 60), width: num(a.width, 240), height: num(a.height, 240),
+      rotation: 0, fill: '#e5e7eb', color: '#111827',
+      imageFit: norm(a.imageFit) === 'contain' ? 'contain' : 'cover',
+      assetId: got.hit.id,
+    };
+    layout.elements ??= [];
+    layout.elements.push(el);
+    return `✅ 已在「${deck.name}」新建插图框「${el.name}」并放入「${got.hit.name}」`
+      + `（id=${el.id}，${Math.round(el.width)}×${Math.round(el.height)} @${Math.round(el.x)},${Math.round(el.y)}）`;
+    });
   };
 
   /* ---------------- 结构化表格文档 ---------------- */
@@ -1338,6 +1524,9 @@ export async function projectOverview(ctx: AgentCtx): Promise<string> {
     // 标出表格/文本：模型分不清就会拿 doc.update 去改表格，界面上一点变化都没有
     lines.push(`【文档】${c.documents.map((d) => `${d.kind === 'table' ? '📊表格' : '📝文本'} ${d.title}(${d.id})`).join('、')}`);
   }
+  // 素材：不列出来的话模型根本不知道库里有什么图，只能凭空编 assetId
+  const assetLine = await describeAssets(ctx, 8);
+  if (assetLine) lines.push(assetLine);
   return lines.join('\n').trim();
 }
 

@@ -78,7 +78,7 @@ const base = P.buildSystemPrompt({
 line('合计', base);
 
 console.log('\n  [拆解]');
-line('· 工具说明书（63 个）', P.TOOL_DOCS.join('\n'));
+line(`· 工具说明书（${P.TOOL_DOCS.length} 个）`, P.TOOL_DOCS.join('\n'));
 line('· 默认知识包 x2', skillsRef(defaultKeys).map((s) => s.content).join('\n'));
 line('· 工程快照（1 牌组/12 卡）', snapshot(1, 12));
 
@@ -102,10 +102,19 @@ const t6 = line('知识包全开 + 3 篇长文档', P.buildSystemPrompt({
 
 /* ---------- 2. 一轮对话总共发多少 ---------- */
 
-console.log('\n  [精简模式：多轮循环第 2 轮起]');
+// 注意：compact 参数目前是刻意保留但不裁剪任何内容（见 test_agent_protocol [3c]），
+// 所以这里省 0% 是对的——真要做精简必须保证不删掉工具参数与知识包。
+console.log('\n  [多轮循环第 2 轮起：compact 前缀]');
 const baseCompact = P.buildSystemPrompt({ snapshot: snapshot(1, 12), skills: skillsRef(defaultKeys), web: true, compact: true });
-line('合计（精简版）', baseCompact);
+line('合计（compact 版）', baseCompact);
 console.log(`  → 相对完整版省 ${(100 - (P.estimateTokens(baseCompact) / P.estimateTokens(base)) * 100).toFixed(0)}%`);
+// 真正省下来的是历史：助手回复进入历史前会被 compressReply 压掉大段 JSON
+for (const cards of [1, 4]) {
+  const raw = '```json\n{"actions":[{"tool":"card.add","args":{"deck":"主牌组","name":"火焰箭","values":{"cost":3,"atk":2,"hp":3,"text":"造成 2 点伤害"}}}]}\n```';
+  const fullHistory = [raw, '好的，已为你创建。'].join('\n');
+  const compressHistory = [P.compressReply(raw, P.parseReply(raw)), '好的，已为你创建。'].join('\n');
+  console.log(`  ${cards} 轮循环的历史：完整 ${P.estimateTokens(fullHistory) * cards} → 压缩后 ${P.estimateTokens(compressHistory) * cards} tokens`);
+}
 
 console.log('\n=== 2. 一轮对话实际发送量（含历史）===');
 

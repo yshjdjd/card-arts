@@ -19,6 +19,11 @@ export interface RenderContext {
   scale: number;
   /** 调试：绘制元素外框 */
   outline?: boolean;
+  /**
+   * 空的图片元素画成可见的占位框（编辑器用）。
+   * 导出 / 打印不传，免得把占位框印到成品上。
+   */
+  placeholders?: boolean;
   diagnostics?: { elementId: string; message: string }[];
 }
 
@@ -211,6 +216,63 @@ function autoFitSize(
 
 /* ---------------- 元素绘制 ---------------- */
 
+/**
+ * 空插图框的占位：浅底 + 虚线边 + 对角交叉 + 图标。
+ *
+ * 之前缺图时这个 case 直接 break，元素在画布上完全隐形——
+ * 用户插入「插图框」后看不见任何东西，会以为功能坏了。
+ * 只由编辑器传入 placeholders 开启，导出 / 打印不受影响。
+ */
+function drawImagePlaceholder(
+  ctx: AnyCtx, x: number, y: number, w: number, h: number, s: number, el: LayoutElement,
+): void {
+  ctx.save();
+  // 底色：直接用元素的 fill，让占位看起来就是这块区域本身
+  ctx.globalAlpha = (el.fillOpacity ?? 1) * 0.55;
+  ctx.fillStyle = el.fill && el.fill !== 'transparent' ? el.fill : '#eef1f6';
+  ctx.beginPath();
+  if (el.borderRadius) roundRect(ctx, x, y, w, h, el.borderRadius * s);
+  else ctx.rect(x, y, w, h);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // 虚线边框
+  ctx.strokeStyle = el.borderWidth && el.borderColor ? el.borderColor : '#9aa1ab';
+  ctx.lineWidth = Math.max(1, (el.borderWidth ?? 2) * s);
+  ctx.setLineDash([6 * s, 5 * s]);
+  ctx.beginPath();
+  if (el.borderRadius) roundRect(ctx, x, y, w, h, el.borderRadius * s);
+  else ctx.rect(x, y, w, h);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 对角交叉
+  ctx.strokeStyle = '#9aa1ab';
+  ctx.lineWidth = Math.max(0.6, 1 * s);
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(x, y); ctx.lineTo(x + w, y + h);
+  ctx.moveTo(x + w, y); ctx.lineTo(x, y + h);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // 文字提示：小框里只画图标，放不下就不画字
+  const unit = Math.min(w, h);
+  ctx.fillStyle = '#6b7280';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const cxp = x + w / 2, cyp = y + h / 2;
+  if (unit * s > 34) {
+    ctx.font = `${Math.round(unit * s * 0.34)}px system-ui, sans-serif`;
+    ctx.fillText('🖼', cxp, cyp - (unit * s > 66 ? unit * s * 0.13 : 0));
+  }
+  if (unit * s > 66) {
+    ctx.font = `${Math.round(Math.min(16 * s, unit * s * 0.13))}px system-ui, sans-serif`;
+    ctx.fillText(el.fieldId ? '等待卡牌填图' : '未选图片', cxp, cyp + unit * s * 0.18);
+  }
+  ctx.restore();
+}
+
 function drawElement(
   ctx: AnyCtx, el: LayoutElement, rc: RenderContext, fields: Field[],
 ): void {
@@ -279,7 +341,12 @@ function drawElement(
 
     case 'image': {
       const img = el.assetId ? rc.images[el.assetId] : undefined;
-      if (!img) { rc.diagnostics?.push({ elementId: el.id, message: `找不到图片素材 ${el.assetId || ''}` }); break; }
+      if (!img) {
+        rc.diagnostics?.push({ elementId: el.id, message: el.assetId ? `找不到图片素材 ${el.assetId}` : '插图框还没选图' });
+        // 编辑器传 placeholders:true；导出/打印不传，免得把占位框印到成品上
+        if (rc.placeholders) drawImagePlaceholder(ctx, x, y, w, h, s, el);
+        break;
+      }
       ctx.save();
       if (el.borderRadius) {
         roundRect(ctx, x, y, w, h, el.borderRadius * s);
