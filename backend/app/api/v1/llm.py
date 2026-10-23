@@ -26,7 +26,11 @@ TIMEOUT = 120.0
 
 class Msg(BaseModel):
     role: str
-    content: str
+    content: str = ""
+    # assistant 发起的原生工具调用
+    tool_calls: list | None = None
+    # role:tool 时对应 assistant 工具调用的 id
+    tool_call_id: str | None = None
 
 
 class ChatBody(BaseModel):
@@ -38,6 +42,9 @@ class ChatBody(BaseModel):
     max_tokens: int | None = 2048
     # OpenAI o 系列的长度字段（与 max_tokens 二选一）
     max_completion_tokens: int | None = None
+    # 原生 function calling：工具定义与选择策略
+    tools: list | None = None
+    tool_choice: str | None = None
     stream: bool = False
     # 厂商特有的思考/推理参数（enable_thinking / reasoning_effort / thinking:{...} 等），原样透传
     extra: dict | None = None
@@ -101,6 +108,16 @@ def _no_temperature(model: str) -> bool:
     return bool(re.match(r"^o\d", m, re.I) or re.match(r"deepseek-reasoner|deepseek-v\d", m, re.I))
 
 
+def _msg_dict(m: Msg) -> dict:
+    """只带上真实存在的字段，避免给上游发 tool_calls:null 这种多余键。"""
+    d: dict = {"role": m.role, "content": m.content}
+    if m.tool_calls is not None:
+        d["tool_calls"] = m.tool_calls
+    if m.tool_call_id is not None:
+        d["tool_call_id"] = m.tool_call_id
+    return d
+
+
 def _payload_of(body: ChatBody) -> dict:
     """组装上游请求体。
 
@@ -109,7 +126,7 @@ def _payload_of(body: ChatBody) -> dict:
     """
     payload: dict = {
         "model": body.model,
-        "messages": [m.model_dump() for m in body.messages],
+        "messages": [_msg_dict(m) for m in body.messages],
         "stream": body.stream,
     }
     if re.match(r"^o\d", body.model.strip(), re.I):
@@ -118,6 +135,9 @@ def _payload_of(body: ChatBody) -> dict:
         payload["max_tokens"] = body.max_tokens
         if not _no_temperature(body.model):
             payload["temperature"] = body.temperature
+    if body.tools:
+        payload["tools"] = body.tools
+        payload["tool_choice"] = body.tool_choice or "auto"
     if body.extra:
         payload.update(body.extra)
     return payload
@@ -164,6 +184,8 @@ async def chat(body: ChatBody):
         "reasoning": reasoning,
         "model": data.get("model", body.model),
         "usage": data.get("usage"),
+        # 原生工具调用（非流式）
+        "tool_calls": message.get("tool_calls") or [],
         # length 表示被 max_tokens 掐断；前端据此提示用户调大，而不是让用户莫名其妙看到半截话
         "finish_reason": choice.get("finish_reason") or "",
     }

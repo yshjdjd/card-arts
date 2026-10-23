@@ -13,11 +13,12 @@ import {
   DEFAULT_SYSTEM_PROMPT,
 } from '../lib/llm';
 import {
-  buildSystemPrompt, callKey, createAgentActions, describeCall, estimateTokens,
+  buildSystemPrompt, buildToolDefinitions, callKey, createAgentActions, describeCall, estimateTokens,
   projectOverview, runToolCalls, TOOL_NAMES,
   type AgentActions, type PromptRef, type ToolCall,
 } from '../lib/agentTools';
 import { runAgent } from '../lib/agentRuntime';
+import { fetchRemoteTools, buildMcpActions } from '../lib/mcp';
 import type { RunResult, ToolRecord } from '../lib/agentProtocol';
 import { allSkills, defaultSkillKeys } from '../lib/skills';
 import type { AgentContext, ChatSession, LLMConfig, ProjectDocument, SkillDef, TodoItem } from '../lib/types';
@@ -57,9 +58,23 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<'chats' | 'context' | 'config'>('chats');
   const boxRef = useRef<HTMLDivElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  // 窗口位置：null 时走 CSS 默认（右下角），拖过之后用绝对坐标
+  const [winPos, setWinPos] = useState<{ x: number; y: number } | null>(null);
+  const winDrag = useRef<{ active: boolean; dx: number; dy: number; moved: boolean }>({
+    active: false, dx: 0, dy: 0, moved: false,
+  });
   const abortRef = useRef<AbortController | null>(null);
   const runLock = useRef(false);
   useEffect(() => () => abortRef.current?.abort(), [projectId]);
+
+  // textarea 随内容自动增高（上限由 CSS max-height 控制）
+  useEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+  }, [input]);
 
   /** 危险操作确认（三选一：拒绝 / 允许一次 / 本次会话都允许） */
   const [approveReq, setApproveReq] = useState<{
@@ -169,6 +184,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
       docs: refs,
       todos: (liveChat?.todos ?? active?.todos ?? []).map((t) => ({ text: t.text, status: t.status })),
       web: agentCtx.web !== false,
+      nativeTools: true,
       extra: cfg?.systemPrompt?.trim() || undefined,
     });
   }, [projectId, project?.name, update, rename, agentCtx, docs, activeId, active?.todos, cfg?.systemPrompt]);
@@ -276,8 +292,9 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
     abortRef.current = ctrl;
 
     /** 执行一批工具调用，并把「本次会话都允许」的授权写回会话 */
+    let effectiveActions: AgentActions = actions;
     const run = async (calls: ToolCall[]): Promise<RunResult> => {
-      const res = await runToolCalls(calls, actions, {
+      const res = await runToolCalls(calls, effectiveActions, {
         approve: askApprove,
         approved: runApproved,
         signal: ctrl.signal,
@@ -325,6 +342,9 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
 
       const model = resolveLLMConfig(cfg, chat.modelOverride || cfg.model).model;
       const outputTokens = clampMaxTokens(model, cfg.maxTokens).value;
+      // 拉取外部 MCP server 提供的工具（拉不到就静默退化为仅核心工具）
+      const remote = await fetchRemoteTools(ctrl.signal);
+      effectiveActions = { ...actions, ...buildMcpActions(remote.tools) };
       const result = await runAgent({
         userText: text,
         history: chat.messages.map((m) => ({ role: m.role, content: m.agentRun ? `${m.content}\n\n执行状态：${m.agentRun.status}\n${m.agentRun.records.map((r) => `${r.tool} ${r.status}: ${r.content}`).join('\n')}` : m.content })),
@@ -334,6 +354,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
         signal: ctrl.signal,
         complete: (messages, onDelta, onFinish) => chatStream({
           cfg, messages, model, signal: ctrl.signal, onDelta, onFinish,
+          tools: buildToolDefinitions(remote.defs),
           onReasoning: (delta) => { think += delta; write(); },
         }),
         execute: run,
@@ -501,8 +522,30 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
   const doneTodos = todos.filter((t) => t.status === 'done').length;
 
   return (
-    <div className="chat-win wide">
-      <div className="hd">
+    <div
+      className="chat-win wide"
+      style={winPos ? { left: winPos.x, top: winPos.y, right: 'auto', bottom: 'auto' } : undefined}
+    >
+      <div
+        className="hd"
+        style={{ cursor: 'grab', touchAction: 'none', userSelect: 'none' }}
+        onPointerDown={(e) => {
+          const rect = e.currentTarget.parentElement!.getBoundingClientRect();
+          winDrag.current = { active: true, dx: e.clientX - rect.left, dy: e.clientY - rect.top, moved: false };
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          if (!winDrag.current.active) return;
+          const nx = Math.min(Math.max(8, e.clientX - winDrag.current.dx), window.innerWidth - 200);
+          const ny = Math.min(Math.max(8, e.clientY - winDrag.current.dy), window.innerHeight - 80);
+          winDrag.current.moved = true;
+          setWinPos({ x: nx, y: ny });
+        }}
+        onPointerUp={(e) => {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+          winDrag.current.active = false;
+        }}
+      >
         <span style={{ flex: 1, fontWeight: 600 }}>🤖 项目助手</span>
         <button className={`btn sm ${tab === 'chats' ? '' : 'ghost'}`} onClick={() => setTab('chats')}>会话</button>
         <button className={`btn sm ${tab === 'context' ? '' : 'ghost'}`} onClick={() => setTab('context')}>
@@ -642,8 +685,10 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
                   </div>
                 )}
                 <div className="inp">
-                  <input
+                  <textarea
+                    ref={taRef}
                     className="input"
+                    rows={1}
                     placeholder={cfg?.enabled ? '说点什么（@ 挂载文档，回车发送，Shift+Enter 换行）' : '规则模式：新增一张卡牌 XXX / 统计一下'}
                     value={input}
                     onChange={(e) => onInputChange(e.target.value)}

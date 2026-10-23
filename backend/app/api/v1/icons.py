@@ -24,6 +24,8 @@ router = APIRouter(prefix="/icons", tags=["icons"])
 
 _FILL_RE = re.compile(r'\sfill="(?!none)[^"]*"', re.I)
 _STROKE_RE = re.compile(r'\sstroke="(?!none)[^"]*"', re.I)
+# 保留 stroke="none"（某些图标局部不描边），其余 stroke 属性（含 currentColor、具体色值）一律剥掉
+_STROKE_ALL_RE = re.compile(r'\sstroke="(?!none)[^"]*"', re.I)
 _SVG_OPEN_RE = re.compile(r"<svg\b", re.I)
 _COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
@@ -31,14 +33,28 @@ _COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 def bake_color(svg_text: str, color: str | None, size: int | None = None) -> str:
     """把颜色烘进 SVG（图标默认纯黑，着色后才能当彩色素材用）。
 
-    只覆盖没有显式 fill 的图形；`fill="none"` 保留（镂空路径靠它生效）。
+    兼容两类图标：
+      - fill 风格（game-icons.net）：路径自带 fill="#..."，剥掉后在根 <svg> 上加 fill。
+      - stroke 风格（lucide / heroicons）：根 <svg> 用 stroke="currentColor" fill="none"，
+        剥掉所有 stroke 属性后在根 <svg> 上加 stroke；fill="none" 保留。
     """
     t = svg_text
     if color:
-        t = _FILL_RE.sub("", t)
-        t = _STROKE_RE.sub("", t)
-        t = t.replace("currentColor", color)
-        t = _SVG_OPEN_RE.sub(f'<svg fill="{color}"', t, count=1)
+        # 判定风格：只要原文件里出现 stroke="currentColor" 或 stroke-width，就按 stroke 图标处理
+        is_stroke_style = bool(
+            re.search(r'stroke="currentColor"', t, re.I)
+            or re.search(r'\sstroke-width\s*=', t, re.I)
+        )
+        if is_stroke_style:
+            # 剥掉所有非 none 的 stroke（含 currentColor 和显式色值），统一改成根上的 stroke="{color}"
+            t = _STROKE_ALL_RE.sub("", t)
+            t = _SVG_OPEN_RE.sub(f'<svg stroke="{color}"', t, count=1)
+        else:
+            # fill 风格：剥掉路径上的 fill，根 <svg> 加 fill
+            t = _FILL_RE.sub("", t)
+            t = _STROKE_RE.sub("", t)
+            t = t.replace("currentColor", color)
+            t = _SVG_OPEN_RE.sub(f'<svg fill="{color}"', t, count=1)
     if size:
         t = re.sub(r'\swidth="[^"]*"', "", t, count=1)
         t = re.sub(r'\sheight="[^"]*"', "", t, count=1)

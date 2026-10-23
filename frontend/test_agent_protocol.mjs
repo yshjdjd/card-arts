@@ -252,6 +252,20 @@ console.log('\n[2c] 输出截断检测');
   ok(!P.looksTruncated(''), '空串不算截断');
 }
 
+{
+  const truncated = '来，开始：\n```json\n{"actions":[{"tool":"card.add","args":{"name":"A"}},{"tool":"element.move","args":{"x":10,"y":20}},{"tool":"card.set","ar';
+  const calls = P.salvageTruncatedCalls(truncated);
+  ok(calls.length === 2, '截断 JSON 抢救出 2 个完整动作', JSON.stringify(calls.map((c) => c.tool)));
+  ok(calls[0]?.tool === 'card.add' && calls[1]?.tool === 'element.move' && calls[1]?.args?.x === 10, '抢救出的动作参数完整');
+  // 字符串里含括号也不能干扰括号深度
+  const tricky = '```json\n{"actions":[{"tool":"doc.append","args":{"doc":"规则","content":"括号 } 和 引号 \\" 都在字符串里"}},\n{"tool":"doc.append","args":{"doc"';
+  const t2 = P.salvageTruncatedCalls(tricky);
+  ok(t2.length === 1 && t2[0]?.args?.content?.includes('引号'), '字符串内的括号不影响抢救', JSON.stringify(t2));
+  ok(P.salvageTruncatedCalls('```json\n{"actions":[{"tool":"card.add","args":{"name":"A"}}]}\n```\n说完了').length === 0, '围栏成对不抢救');
+  ok(P.salvageTruncatedCalls('```json\n{"actions":[').length === 0, '一个完整动作都没有时不抢救');
+  ok(P.salvageTruncatedCalls('今天天气不错').length === 0, '普通文本不抢救');
+}
+
 /* ---------- 2d. DeepSeek 原生 DSML 泄漏 ---------- */
 console.log('\n[2d] DSML 标签（DeepSeek 原生调用格式泄漏）');
 
@@ -328,6 +342,27 @@ console.log('\n[3] 系统提示词');
   // 精简模式下工具说明书会被压成名字，但这条禁令必须留着，否则续轮更容易跑偏
   const compact = P.buildSystemPrompt({ snapshot: '项目「测试」：1 个牌组', compact: true });
   ok(/DSML/.test(compact), '精简模式仍保留 DSML 禁令');
+}
+
+/* ---------- 3d. 原生 function calling 工具定义与提示词 ---------- */
+console.log('\n[3d] 原生 function calling');
+
+{
+  const defs = P.buildToolDefinitions();
+  ok(defs.length === P.TOOL_NAMES.length, '工具定义数量与工具数一致');
+  ok(defs.every((d) => d.type === 'function' && d.function.name && d.function.description && d.function.parameters?.type === 'object'),
+    '每个定义都是合法的 function 结构');
+  ok(new Set(defs.map((d) => d.function.name)).size === defs.length, '工具定义无重名');
+  // 每个工具都有参数 schema（无空实现）
+  const noParams = P.TOOL_NAMES.filter((n) => !P.TOOL_PARAMS[n]);
+  ok(noParams.length === 0, '每个工具都有参数 schema', noParams.join(','));
+
+  const native = P.buildSystemPrompt({ snapshot: '快照', nativeTools: true });
+  ok(!native.includes('## 可用工具'), '原生模式不再罗列工具说明书（省 token）');
+  ok(/直接调用已提供的原生工具/.test(native), '原生模式规则 1 指向 function calling');
+  ok(/DSML/.test(native) && /严禁/.test(native), '原生模式仍禁止标签式语法');
+  const text = P.buildSystemPrompt({ snapshot: '快照' });
+  ok(text.includes('## 可用工具') && /```json/.test(text), '文本模式仍保留工具说明书与 JSON 示例');
 }
 
 /* ---------- 3b. 动态上下文 ---------- */

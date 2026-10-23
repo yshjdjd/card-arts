@@ -192,15 +192,22 @@ export const api = {
     base_url: string;
     api_key: string;
     model: string;
-    messages: Array<{ role: string; content: string }>;
+    messages: Array<{ role: string; content?: string; tool_calls?: unknown; tool_call_id?: string }>;
     temperature?: number;
     max_tokens?: number;
     /** OpenAI o 系列的长度字段（与 max_tokens 二选一） */
     max_completion_tokens?: number;
+    /** 原生 function calling 工具定义与选择策略 */
+    tools?: unknown;
+    tool_choice?: string;
     stream?: boolean;
     /** 厂商特有的思考 / 推理参数，原样合并进上游请求体 */
     extra?: Record<string, unknown>;
-  }, signal?: AbortSignal) => req<{ content: string; model: string; usage?: unknown; finish_reason?: string; reasoning?: string }>('/llm/chat', {
+  }, signal?: AbortSignal) => req<{
+    content: string; model: string; usage?: unknown;
+    finish_reason?: string; reasoning?: string;
+    tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+  }>('/llm/chat', {
     signal,
     method: 'POST',
     body: JSON.stringify(body),
@@ -218,7 +225,32 @@ export const api = {
     req<WebSearchItem[]>('/web/search', { method: 'POST', body: JSON.stringify(body), signal }),
   webFetch: (body: { url: string; max_chars?: number }, signal?: AbortSignal) =>
     req<WebFetchResult>('/web/fetch', { method: 'POST', body: JSON.stringify(body), signal }),
+
+  /* ---------- MCP：外部工具桥接 ---------- */
+  mcpListTools: (signal?: AbortSignal) =>
+    req<{ tools: McpRemoteTool[]; errors: Array<{ server: string; error: string }> }>('/llm/mcp/tools', { signal }),
+  mcpCallTool: (body: { tool: string; arguments: Record<string, unknown> }, signal?: AbortSignal) =>
+    req<{ content: string }>('/llm/mcp/call', { method: 'POST', body: JSON.stringify(body), signal }),
+  mcpServers: () =>
+    req<{ servers: McpServerConfig[] }>('/llm/mcp/servers'),
+  mcpSaveServers: (servers: McpServerConfig[]) =>
+    req<{ ok: boolean; count: number }>('/llm/mcp/servers', { method: 'PUT', body: JSON.stringify({ servers }) }),
 };
+
+export interface McpRemoteTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  server: string;
+}
+
+export interface McpServerConfig {
+  name: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  enabled: boolean;
+}
 
 export interface WebSearchItem {
   title: string;

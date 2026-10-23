@@ -1,7 +1,17 @@
 /** Context selection keeps current-run messages intact and drops only whole old turns. */
+export interface WireToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+
 export interface AgentMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** assistant 发起的原生工具调用 */
+  tool_calls?: WireToolCall[];
+  /** role:tool 时，对应 assistant 工具调用的 id */
+  tool_call_id?: string;
 }
 
 // Conservative upper estimate, including punctuation/JSON, rather than a billing tokenizer.
@@ -16,7 +26,10 @@ export function selectContext(
   contextWindow = 65536,
   outputTokens = 4096,
 ): { messages: AgentMessage[]; dropped: number } {
-  const size = (messages: AgentMessage[]) => messages.reduce((n, m) => n + contextTokens(m.content) + 12, 0);
+  const size = (messages: AgentMessage[]) => messages.reduce((n, m) => n
+    + contextTokens(m.content)
+    + (m.tool_calls ? contextTokens(JSON.stringify(m.tool_calls)) : 0)
+    + 12, 0);
   const budget = contextWindow - outputTokens - 1024;
   const fixed: AgentMessage[] = [{ role: 'system', content: system }, ...current];
   const used = size(fixed);

@@ -6,22 +6,50 @@ export class StreamError extends Error {
   }
 }
 
+/** 原生 function calling 调用（流式累积后的结果） */
+export interface NativeToolCall {
+  index: number;
+  id: string;
+  name: string;
+  /** 累积的参数 JSON 字符串 */
+  arguments: string;
+}
+
+export interface SSEResult {
+  content: string;
+  toolCalls: NativeToolCall[];
+}
+
 export async function readSSE(
   body: ReadableStream<Uint8Array>,
   onDelta?: (text: string) => void,
   signal?: AbortSignal,
   onFinish?: (reason: string) => void,
   onReasoning?: (text: string) => void,
-): Promise<string> {
+  onToolCall?: (calls: NativeToolCall[]) => void,
+): Promise<SSEResult> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '', full = '', reason = '';
   let dataLines: string[] = [];
   let ended = false;
+  const toolCalls: NativeToolCall[] = [];
   const abort = () => { void reader.cancel(); };
   signal?.addEventListener('abort', abort, { once: true });
   const checkAbort = () => {
     if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
+  };
+  const collectToolCalls = (raw: unknown) => {
+    if (!Array.isArray(raw)) return;
+    for (const tc of raw) {
+      const index = Number(tc?.index ?? 0);
+      let acc = toolCalls[index];
+      if (!acc) { acc = { index, id: '', name: '', arguments: '' }; toolCalls[index] = acc; }
+      if (tc.id) acc.id = tc.id;
+      if (tc.function?.name) acc.name += tc.function.name;
+      if (tc.function?.arguments) acc.arguments += tc.function.arguments;
+    }
+    onToolCall?.(toolCalls.filter(Boolean));
   };
   const dispatch = () => {
     const data = dataLines.join('\n').trim();
@@ -42,6 +70,7 @@ export async function readSSE(
     const think = choice.delta?.reasoning_content ?? choice.delta?.reasoning
       ?? choice.message?.reasoning_content ?? choice.message?.reasoning ?? '';
     if (typeof think === 'string' && think) onReasoning?.(think);
+    collectToolCalls(choice.delta?.tool_calls ?? choice.message?.tool_calls);
     if (choice.finish_reason) reason = choice.finish_reason;
   };
   const line = (raw: string) => {
@@ -61,7 +90,7 @@ export async function readSSE(
     }
     if (!ended && !reason) throw new StreamError('连接提前结束，未收到模型完成信号；已保留收到的内容', full);
     onFinish?.(reason);
-    return full;
+    return { content: full, toolCalls: toolCalls.filter(Boolean) };
   } catch (error) {
     checkAbort();
     if (error instanceof StreamError) throw error;

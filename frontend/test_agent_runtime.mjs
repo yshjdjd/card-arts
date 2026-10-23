@@ -30,12 +30,12 @@ const config = { ...L.defaultLLMConfig(), enabled: true, model: 'fake', baseUrl:
 test('SSE preserves Chinese byte fragments, reasoning, finish reason and final line without newline', async () => {
   let text = '', reasoning = '', reason = '';
   const wire = event({ choices: [{ delta: { reasoning_content: '思考' } }] }) + chunk('你好😀', 'stop') + 'data: [DONE]';
-  assert.equal(await S.readSSE(stream(wire, 1), (d) => text += d, undefined, (r) => reason = r, (d) => reasoning += d), '你好😀');
+  assert.equal((await S.readSSE(stream(wire, 1), (d) => text += d, undefined, (r) => reason = r, (d) => reasoning += d)).content, '你好😀');
   assert.equal(text, '你好😀'); assert.equal(reasoning, '思考'); assert.equal(reason, 'stop');
 });
 test('SSE handles multiline data events and CRLF', async () => {
   const wire = 'data: {"choices":\r\ndata: [{"delta":{"content":"OK"},"finish_reason":"stop"}]}\r\n\r\ndata: [DONE]\r\n\r\n';
-  assert.equal(await S.readSSE(stream(wire, 1)), 'OK');
+  assert.equal((await S.readSSE(stream(wire, 1))).content, 'OK');
 });
 test('SSE exposes upstream errors after partial text rather than accepting it', async () => {
   await assert.rejects(S.readSSE(stream(chunk('一半') + event({ error: { message: 'upstream timeout' } }) + 'data: [DONE]\n\n')), (e) => e.partial === '一半' && /timeout/.test(e.message));
@@ -55,6 +55,17 @@ test('SSE abort releases a blocked reader', async () => {
   await assert.rejects(pending, { name: 'AbortError' });
   assert.equal(cancelled, true);
 });
+test('SSE accumulates fragmented tool_calls (id, name and arguments arriving in separate chunks)', async () => {
+  const tc = (tcDelta, finish_reason) => event({ choices: [{ delta: { tool_calls: [tcDelta] }, finish_reason }] });
+  const wire = tc({ index: 0, id: 'call_0', type: 'function', function: { name: 'card.add', arguments: '' } })
+    + tc({ index: 0, function: { arguments: '{"a":' } })
+    + tc({ index: 0, function: { arguments: '1}' } })
+    + tc({}, 'tool_calls') + 'data: [DONE]';
+  const r = await S.readSSE(stream(wire, 1));
+  assert.equal(r.toolCalls.length, 1);
+  assert.deepEqual(r.toolCalls[0], { index: 0, id: 'call_0', name: 'card.add', arguments: '{"a":1}' });
+  assert.equal(r.content, '');
+});
 test('transport does not retry an errored stream or a thinking-only length completion', async () => {
   const original = globalThis.fetch;
   let requests = 0;
@@ -64,7 +75,7 @@ test('transport does not retry an errored stream or a thinking-only length compl
     assert.equal(requests, 1);
     let reason = '';
     globalThis.fetch = async () => { requests++; return new Response(stream(chunk('', 'length')), { headers: { 'content-type': 'text/event-stream' } }); };
-    assert.equal(await L.chatStream({ cfg: config, messages: [], onFinish: (r) => reason = r }), '');
+    assert.equal((await L.chatStream({ cfg: config, messages: [], onFinish: (r) => reason = r })).content, '');
     assert.equal(reason, 'length'); assert.equal(requests, 2);
   } finally { globalThis.fetch = original; }
 });
@@ -77,7 +88,7 @@ test('JSON stream fallback consumes the response once and non-streaming proxy pr
       seen = init;
       return Response.json({ content: 'OK', choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }], finish_reason: 'stop' });
     };
-    assert.equal(await L.chatStream({ cfg: config, messages: [] }), 'OK');
+    assert.equal((await L.chatStream({ cfg: config, messages: [] })).content, 'OK');
     await L.chatComplete({ cfg: { ...config, model: 'o4-mini', maxTokens: 8192 }, messages: [], signal });
     assert.equal(JSON.parse(seen.body).max_completion_tokens, 8192);
     assert.equal(seen.signal, signal);
@@ -128,32 +139,109 @@ test('runtime retains docs, tool schemas and all intermediate results beyond fou
       assert.equal(messages[0].content, '规则、资料、参数');
       for (let n = 0; n < calls; n++) assert.ok(messages.some((m) => m.content.includes(`RESULT_${n}`)));
       const reply = calls < 5 ? json([{ tool: 'deck.list', args: { n: calls } }]) : '全部完成';
-      calls++; delta(reply); finish('stop'); return reply;
+      calls++; delta(reply); finish('stop'); return { content: reply, toolCalls: [] };
     }, execute: async () => ({ text: `RESULT_${calls - 1}`, records: [], approved: [] }), onText: (value) => displayed = value,
   });
   assert.equal(result.status, 'completed'); assert.equal(result.rounds, 6);
   assert.ok(displayed.endsWith('全部完成')); assert.ok(!displayed.includes('```'));
 });
-test('length and unconfirmed malformed output never execute any actions', async () => {
+test('truncated reply keeps complete prefix actions and auto-continues instead of discarding the round', async () => {
+  let executed = 0, rounds = 0;
+  const truncated = '好的，开始。\n```json\n'
+    + JSON.stringify({ actions: [{ tool: 'card.add', args: { name: 'A' } }] }) + '\n```\n'
+    + '```json\n{"actions":[{"tool":"card.set","args":{"value":1}},{"tool":"card.set","ar';
+  const result = await R.runAgent({ userText: 'task', history: [], outputTokens: 8192, system: async () => '',
+    complete: async (_, delta, finish) => {
+      rounds++;
+      if (rounds === 1) { delta(truncated); finish('length'); return { content: truncated, toolCalls: [] }; }
+      finish('stop'); delta('剩余已完成'); return { content: '剩余已完成', toolCalls: [] };
+    },
+    execute: async (calls) => {
+      executed += calls.length;
+      return { text: 'ok', records: calls.map((c) => ({ ...c, status: 'success', content: 'ok' })), approved: [] };
+    },
+    onText: () => {},
+  });
+  assert.equal(executed, 2, '闭合块 1 个 + 半截块里写完的 1 个都被抢救执行');
+  assert.equal(rounds, 2, '抢救后自动续跑，不等用户说继续');
+  assert.equal(result.status, 'completed');
+});
+test('truncated reply with zero complete actions still executes nothing', async () => {
   for (const reason of ['length', '']) {
     let executed = 0;
     const result = await R.runAgent({ userText: 'task', history: [], outputTokens: 8192, system: async () => '',
-      complete: async (_, delta, finish) => { const text = json([add]) + '\n```json\n{"actions":['; delta(text); finish(reason); return text; },
+      complete: async (_, delta, finish) => { const t = '```json\n{"actions":['; delta(t); finish(reason); return { content: t, toolCalls: [] }; },
       execute: async () => { executed++; throw new Error('must not execute'); }, onText: () => {},
     });
     assert.equal(executed, 0); assert.ok(['output_limit', 'invalid_output'].includes(result.status));
   }
 });
+test('native function calling runs via assistant.tool_calls + role:tool and drops the truncated last call', async () => {
+  const seen = [];
+  const executed = [];
+  const result = await R.runAgent({ userText: 'task', history: [], outputTokens: 8192, system: async () => '规则',
+    complete: async (msgs, delta, finish) => {
+      seen.push(msgs);
+      if (seen.length === 1) {
+        finish('length'); // 最后一个调用参数没写完，现实里即 length
+        return {
+          content: '',
+          toolCalls: [
+            { index: 0, id: 'call_0', name: 'card.add', arguments: JSON.stringify({ name: 'A' }) },
+            { index: 1, id: 'call_1', name: 'card.set', arguments: '{"value":1' },
+          ],
+        };
+      }
+      finish('stop');
+      return { content: '全部完成', toolCalls: [] };
+    },
+    execute: async (calls) => {
+      executed.push(...calls.map((c) => c.tool));
+      return { text: 'ok', records: calls.map((c) => ({ ...c, status: 'success', content: 'ok' })), approved: [] };
+    },
+    onText: () => {},
+  });
+  assert.deepEqual(executed, ['card.add'], '只有参数完整的调用被执行，截断的最后一个丢弃');
+  assert.equal(result.status, 'completed');
+  const round2 = seen[1];
+  const ai = round2.find((m) => m.role === 'assistant');
+  assert.ok(ai?.tool_calls?.[0]?.id === 'call_0', 'assistant 消息带原生 tool_calls');
+  assert.ok(round2.some((m) => m.role === 'tool' && m.tool_call_id === 'call_0'), '结果以 role:tool 回传');
+});
+test('oversized batches are mechanically capped and assistant history stays compressed', async () => {
+  const perRound = [], sent = [];
+  const many = Array.from({ length: 12 }, (_, i) => ({ tool: 'card.add', args: { name: `C${i}` } }));
+  const result = await R.runAgent({ userText: 'task', history: [], outputTokens: 8192, system: async () => '规则',
+    complete: async (msgs, delta, finish) => {
+      sent.push(msgs);
+      finish('stop');
+      if (perRound.length === 0) return { content: json(many), toolCalls: [] };
+      if (perRound.length === 1) return { content: json(many.slice(8)), toolCalls: [] };
+      return { content: '全部完成', toolCalls: [] };
+    },
+    execute: async (calls) => {
+      perRound.push(calls.length);
+      return { text: 'ok', records: calls.map((c) => ({ ...c, status: 'success', content: 'ok' })), approved: [] };
+    },
+    onText: () => {},
+  });
+  assert.deepEqual(perRound, [8, 4], '12 个动作被切成 8 + 4 两批');
+  assert.equal(result.status, 'completed');
+  // 第二轮起，历史消息里不再带大段工具 JSON（系统提示词里的示例除外）
+  for (const msgs of sent.slice(1)) {
+    assert.ok(msgs.filter((m) => m.role !== 'system').every((m) => !m.content.includes('"actions"')), 'assistant 历史已压缩，不再重发工具 JSON');
+  }
+});
 test('stop ending with a comma is not falsely reported as max-token truncation', async () => {
   const result = await R.runAgent({ userText: 'task', history: [], outputTokens: 4096, system: async () => '',
-    complete: async (_, delta, finish) => { finish('stop'); delta('例如，'); return '例如，'; }, execute: async () => { throw new Error('unexpected'); }, onText: () => {},
+    complete: async (_, delta, finish) => { finish('stop'); delta('例如，'); return { content: '例如，', toolCalls: [] }; }, execute: async () => { throw new Error('unexpected'); }, onText: () => {},
   });
   assert.equal(result.status, 'completed');
 });
 test('runtime returns explicit round-limit status', async () => {
   let shown = '';
   const result = await R.runAgent({ userText: 'task', history: [], maxRounds: 2, outputTokens: 1000, system: async () => '',
-    complete: async (_, delta, finish) => { finish('stop'); return json([{ tool: 'deck.list', args: {} }]); },
+    complete: async (_, delta, finish) => { finish('stop'); delta(json([{ tool: 'deck.list', args: {} }])); return { content: json([{ tool: 'deck.list', args: {} }]), toolCalls: [] }; },
     execute: async () => ({ text: 'read', records: [], approved: [] }), onText: (value) => shown = value,
   });
   assert.equal(result.status, 'round_limit'); assert.match(shown, /2 轮/);
@@ -164,9 +252,9 @@ test('one replayed write can recover using cached results; repeated failures sto
     userText: 'task', history: [], outputTokens: 4096, system: async () => '', onText: () => {},
     execute: async () => ({ text: 'cached created A', records: [{ ...add, status: 'replayed', content: 'cached created A' }], approved: [] }),
   };
-  const recovered = await R.runAgent({ ...setup, complete: async (_, delta, finish) => { finish('stop'); return ++rounds === 1 ? json([add]) : '已核对完成'; } });
+  const recovered = await R.runAgent({ ...setup, complete: async (_, delta, finish) => { finish('stop'); const r = ++rounds === 1 ? json([add]) : '已核对完成'; delta(r); return { content: r, toolCalls: [] }; } });
   assert.equal(recovered.status, 'completed'); assert.equal(rounds, 2);
-  const blocked = await R.runAgent({ ...setup, complete: async () => json([add]) });
+  const blocked = await R.runAgent({ ...setup, complete: async (_, delta, finish) => { finish('stop'); const r = json([add]); delta(r); return { content: r, toolCalls: [] }; } });
   assert.equal(blocked.status, 'blocked'); assert.equal(blocked.rounds, 2);
 });
 test('executor records completed writes, stops subsequent writes on abort, and deduplicates successful writes across rounds', async () => {
