@@ -89,7 +89,7 @@ test('JSON stream fallback consumes the response once and non-streaming proxy pr
       return Response.json({ content: 'OK', choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }], finish_reason: 'stop' });
     };
     assert.equal((await L.chatStream({ cfg: config, messages: [] })).content, 'OK');
-    await L.chatComplete({ cfg: { ...config, model: 'o4-mini', maxTokens: 8192 }, messages: [], signal });
+    await L.chatComplete({ cfg: { ...config, model: 'o4-mini', outputMode: 'manual', maxTokens: 8192 }, messages: [], signal });
     assert.equal(JSON.parse(seen.body).max_completion_tokens, 8192);
     assert.equal(seen.signal, signal);
   } finally { globalThis.fetch = original; }
@@ -325,4 +325,167 @@ test('read concurrency is bounded and successful updates may return to an earlie
   const journal = new Map(), seen = [];
   for (const value of ['A', 'B', 'A']) await P.runToolCalls([{ tool: 'card.set', args: { value } }], { 'card.set': async ({ value }) => { seen.push(value); return '✅'; } }, { journal });
   assert.deepEqual(seen, ['A', 'B', 'A']);
+});
+
+const H = await load('./src/lib/agentHistory.ts');
+test('history restores native pairs without duplicating display prose or leaving pending calls', () => {
+  const restored = H.restoreHistory([{ id: 'a', role: 'assistant', content: 'DISPLAY', agentRun: { status: 'running', records: [], messages: [
+    { role: 'user', content: 'original' },
+    { role: 'assistant', content: '', tool_calls: [{id:'ok',type:'function',function:{name:'x',arguments:'{}'}},{id:'pending',type:'function',function:{name:'y',arguments:'{}'}}] },
+    { role: 'tool', tool_call_id: 'ok', content: 'done' }
+  ] }}]);
+  assert.equal(restored[0].tool_calls.length, 1);
+  assert.equal(restored[0].tool_calls[0].id, 'ok');
+  assert.ok(!JSON.stringify(restored).includes('DISPLAY'));
+  assert.match(restored.at(-1).content, /中断/);
+});
+test('history search and read are scoped and paginated', async () => {
+  const tools = H.historyTools([{id:'one',role:'user',content:'约束'+ 'a'.repeat(7000)}]);
+  assert.equal(JSON.parse(await tools['conversation.search']({query:'约束'}))[0].id, 'one');
+  assert.equal(JSON.parse(await tools['conversation.readTurn']({id:'one'})).nextOffset, 6000);
+  assert.match(await tools['conversation.readTurn']({id:'other'}), /未找到/);
+});
+test('runtime awaits durable checkpoints before executing mutations', async () => {
+  let saved = false;
+  await R.runAgent({userText:'test',history:[],system:async()=>'',outputTokens:1000,
+    onCheckpoint:async (messages)=>{ if(messages.some(m=>m.role==='assistant')) saved=true; },
+    complete:async()=>({content:json([add]),toolCalls:[],finishReason:'stop'}),
+    execute:async()=>{assert.ok(saved); return {text:'done',records:[],approved:[]};},
+    onText:()=>{},maxRounds:1});
+});
+
+const M = await load('./src/lib/agentMemory.ts');
+test('task memory preserves initial request, recent changes, pinned constraints and execution status', () => {
+ const chat = {id:'c',projectId:'p',title:'t',messages:Array.from({length:9},(_,i)=>({id:String(i),role:'user',content:i===0?'禁止修改背面':'修改'+i})), pinnedMemory:'最小字号24',todos:[{id:'t',text:'检查溢出',status:'pending'}]};
+ const memory=M.taskMemory(chat);
+ assert.match(memory,/禁止修改背面/); assert.match(memory,/修改8/); assert.match(memory,/最小字号24/); assert.match(memory,/pending/);
+});
+test('fork copies only selected history and clears authorizations and future todos', () => {
+ const chat={id:'c',projectId:'p',title:'t',messages:[{id:'a',role:'user',content:'one'},{id:'b',role:'assistant',content:'two'}],context:{docIds:[],skills:[],approved:['delete']},todos:[{id:'future',text:'later',status:'done'}]};
+ const fork=M.forkSession(chat,'a','new');
+ assert.equal(fork.messages.length,1); assert.deepEqual(fork.context.approved,[]);assert.deepEqual(fork.todos,[]);
+ fork.messages[0].content='changed';assert.equal(chat.messages[0].content,'one');
+ assert.throws(()=>M.forkSession(chat,'missing','new'));
+});
+
+const eventRows = new Map();
+globalThis.agentEventRows = eventRows;
+const E = await load('./src/db/agentEvents.ts', [{name:'event-db',setup(build){
+ build.onResolve({filter:/schema$/},()=>({path:'event-db',namespace:'event-db'}));
+ build.onLoad({filter:/.*/,namespace:'event-db'},()=>({contents:`export const db={transaction:async (...args)=>args.at(-1)(), chats:{get:async()=>({id:'c'})},agentEvents:{bulkPut:async rows=>rows.forEach(r=>globalThis.agentEventRows.set(r.id,r)),where:()=>({equals:id=>({toArray:async()=>[...globalThis.agentEventRows.values()].filter(r=>r.chatId===id)})})}};`}));
+}}]);
+test('event checkpoints append idempotently and hydrate only their own session',async()=>{
+ const items=[{role:'user',content:'one'},{role:'assistant',content:'two'}];
+ await E.saveAgentItems('c','m',items,0);await E.saveAgentItems('c','m',items,0);
+ assert.equal(eventRows.size,2);
+ await E.saveAgentItems('other','m',[{role:'user',content:'private'}],0);
+ const hydrated=await E.hydrateAgentItems({id:'c',messages:[{id:'m',agentRun:{status:'running',records:[]}}]});
+ assert.deepEqual(hydrated.messages[0].agentRun.messages,items);
+});
+test('fork invalidates summaries referring to future conversation',()=>{
+ const fork=M.forkSession({id:'c',messages:[{id:'a',role:'user',content:'x'}],title:'t',summary:{text:'future',throughMessageId:'b'}},'a','new');
+ assert.equal(fork.summary,undefined);
+});
+
+test('large tool output is archived and returns a bounded retrievable reference', async()=>{
+ let archived='';
+ const result=await P.runToolCalls([{tool:'project.overview',args:{}}],{'project.overview':async()=> 'x'.repeat(9000)}, {storeResult:async(tool,content)=>{archived=content;return 'ref-one';}});
+ assert.ok(archived.length>9000);assert.match(result.records[0].content,/ref-one/);assert.ok(result.records[0].content.length<4000);
+});
+test('archive failure never turns a successful mutation into a retryable failure', async()=>{
+ const journal=new Map();let writes=0;
+ const calls=[{tool:'card.add',args:{name:'once'}}];
+ const options={journal,storeResult:async()=>{throw new Error('disk');}};
+ const actions={'card.add':async()=>{writes++;return 'x'.repeat(9000);}};
+ const first=await P.runToolCalls(calls,actions,options);
+ assert.equal(first.records[0].status,'success');
+ const second=await P.runToolCalls(calls,actions,options);
+ assert.equal(second.records[0].status,'replayed');assert.equal(writes,1);
+});
+
+const V=await load('./src/lib/agentRevision.ts');
+test('revision conflicts block repeated writes until a real project read completes',()=>{
+ const guard=new V.RevisionGuard(1);
+ assert.throws(()=>guard.before(2,false),/版本已变化/);
+ assert.throws(()=>guard.before(2,false));
+ guard.before(2,true);guard.after(2,false);
+ assert.throws(()=>guard.before(2,false));
+ guard.before(2,true);guard.after(2,true);guard.before(2,false);
+ guard.after(3,false);guard.before(3,false);
+});
+test('summary candidates never split a user turn or include future summarized messages',()=>{
+ const messages=Array.from({length:12},(_,i)=>({id:String(i),role:i%3===0?'user':'assistant',content:'x'}));
+ const covered=M.summaryCandidates({messages,summary:{throughMessageId:'2'}});
+ assert.equal(covered[0].id,'3');assert.equal(covered.at(-1).id,'5');
+ assert.equal(messages[Number(covered.at(-1).id)+1].role,'user');
+});
+test('per-call guard checks every write and blocks the remaining batch after external edits',async()=>{
+ let writes=0;let checks=0;
+ const result=await P.runToolCalls([{tool:'card.update',args:{}},{tool:'card.update',args:{}}],{'card.update':async()=>{writes++;return 'ok';}}, {beforeCall:async()=>{if(++checks===2)throw new Error('version conflict');}});
+ assert.equal(writes,1);assert.deepEqual(result.records.map(r=>r.status),['success','error']);
+});
+
+test('preparation-stage interruption is visible even before any transcript item exists',()=>{
+ const history=H.restoreHistory([{id:'pending',role:'assistant',content:'',agentRun:{status:'running',records:[]}}]);
+ assert.match(history[0].content,/准备或请求阶段中断/);
+ assert.match(history[0].content,/未确认完成/);
+});
+
+const CP=await load('./src/lib/agentCompaction.ts');
+test('manual compaction preserves source and refuses truncated summaries',async()=>{
+ const chat={messages:Array.from({length:12},(_,i)=>({id:String(i),role:i%2?'assistant':'user',content:'history'}))};
+ const original=JSON.stringify(chat);
+ await assert.rejects(CP.compactSession(chat,32000,'qa',async()=>({text:'half',reason:'length'})),/未完整/);
+ assert.equal(JSON.stringify(chat),original);
+ const summary=await CP.compactSession(chat,32000,'qa',async()=>({text:'done',reason:'stop'}));
+ assert.equal(summary.throughMessageId,'5');assert.equal(summary.text,'done');assert.equal(JSON.stringify(chat),original);
+});
+test('compaction handles short histories without making a model request',async()=>{
+ let calls=0;await assert.rejects(CP.compactSession({messages:[]},32000,'qa',async()=>{calls++;return {text:'x',reason:'stop'};}),/历史不足/);assert.equal(calls,0);
+});
+test('stream captures usage-only events for context accounting',async()=>{
+ const result=await S.readSSE(stream(event({choices:[{delta:{content:'ok'},finish_reason:'stop'}]})+event({choices:[],usage:{prompt_tokens:123,completion_tokens:8,total_tokens:131}})+'data: [DONE]\n\n'));
+ assert.equal(result.usage.prompt_tokens,123);assert.equal(result.usage.total_tokens,131);
+});
+
+const MC=await load('./src/lib/modelCapacity.ts');
+test('capacity follows actual model metadata and scoped presets with explicit manual override',()=>{
+ const cfg={baseUrl:'https://api.deepseek.com/v1',model:'deepseek-v4-pro'};
+ assert.equal(MC.resolveCapacity(cfg).tokens,1048576);
+ assert.equal(MC.resolveCapacity({...cfg,model:'deepseek-flash'}).tokens,1048576);
+ assert.equal(MC.resolveCapacity({...cfg,contextWindow:32768}).tokens,32768);
+ assert.equal(MC.resolveCapacity({...cfg,contextWindow:32768,contextMode:'auto'}).tokens,1048576);
+ const meta={scope:MC.modelScope(cfg.baseUrl),models:{'deepseek-v4-pro':{context_window:262144}}};
+ assert.equal(MC.resolveCapacity({...cfg,modelLimits:meta}).tokens,262144);
+ assert.equal(MC.resolveCapacity({...cfg,baseUrl:'https://other.test/v1',modelLimits:meta}).tokens,1048576);
+ assert.equal(MC.resolveCapacity({...cfg,model:'unknown'}).tokens,65536);
+ assert.equal(MC.resolveCapacity(cfg,'unknown').tokens,65536);
+ assert.equal(MC.autoCompactThreshold(1048576),629145);
+});
+test('model discovery validates capacity metadata without guessing missing values',()=>{
+ assert.equal(MC.parseModelLimits([{id:'a',context_window:1048576}]).a.context_window,1048576);
+ assert.equal(MC.parseModelLimits([{id:'b',context_length:131072}]).b.context_window,131072);
+ assert.deepEqual(MC.parseModelLimits([{id:'c',context_window:-1}]).c,{});
+});
+
+test('output budgets adapt to thinking mode, metadata, manual settings and chat overrides',()=>{
+ const cfg={...config,model:'deepseek-v4-pro',outputMode:'auto',thinking:false};
+ assert.equal(L.resolveOutputBudget(cfg).value,32768);
+ assert.equal(L.resolveOutputBudget({...cfg,thinking:true}).value,65536);
+ assert.equal(L.resolveOutputBudget({...cfg,thinking:true,thinkingEffort:'max'}).value,131072);
+ assert.equal(L.resolveOutputBudget({...cfg,outputMode:'manual',maxTokens:131072}).value,131072);
+ assert.equal(L.resolveOutputBudget({...cfg,outputMode:undefined,maxTokens:17152}).value,17152);
+ const modelLimits={scope:MC.modelScope(cfg.baseUrl),models:{'deepseek-v4-pro':{max_output_tokens:24000,context_window:1048576}}};
+ assert.equal(L.resolveOutputBudget({...cfg,modelLimits}).value,24000);
+ assert.equal(L.resolveOutputBudget(cfg,'unknown').cap,32768);
+ assert.equal(L.resolveOutputBudget(cfg,cfg.model,1800).value,1800);
+});
+test('128K manual output survives actual proxy and direct requests; summary overrides stay small',async()=>{
+ const original=globalThis.fetch;
+ try{for(const useProxy of [true,false]){
+  let body;globalThis.fetch=async(_,init)=>{body=JSON.parse(init.body);return Response.json({choices:[{message:{content:'ok'},finish_reason:'stop'}]});};
+  const cfg={...config,model:'deepseek-v4-pro',outputMode:'manual',maxTokens:131072,useProxy};
+  await L.chatStream({cfg,messages:[]});assert.equal(body.max_tokens,131072);
+  await L.chatStream({cfg:{...cfg,outputMode:'auto'},maxTokens:1800,messages:[]});assert.equal(body.max_tokens,1800);
+ }}finally{globalThis.fetch=original;}
 });

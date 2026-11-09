@@ -218,7 +218,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   llmModels: (body: { base_url: string; api_key: string }) =>
-    req<{ models: string[] }>('/llm/models', { method: 'POST', body: JSON.stringify(body) }),
+    req<{ models: string[]; metadata?: unknown[] }>('/llm/models', { method: 'POST', body: JSON.stringify(body) }),
 
   /* ---------- 联网（后端代跑，绕开浏览器跨域）---------- */
   webSearch: (body: { query: string; provider?: string; api_key?: string; max_results?: number; lang?: string }, signal?: AbortSignal) =>

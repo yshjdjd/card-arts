@@ -46,6 +46,8 @@ export class CardArtsDB extends Dexie {
   settings!: Table<AppSettings, string>;
   /** v2：项目内的多会话 */
   chats!: Table<ChatSession, string>;
+  agentResults!: Table<{ chatId: string; ref: string; tool: string; content: string; createdAt: string }, [string, string]>;
+  agentEvents!: Table<{ id: string; chatId: string; messageId: string; sequence: number; payload: import('../lib/agentContext').AgentMessage; createdAt: string }, string>;
 
   constructor() {
     super('card_arts');
@@ -60,6 +62,8 @@ export class CardArtsDB extends Dexie {
     this.version(2).stores({
       chats: 'id, projectId, updatedAt, title',
     });
+    this.version(3).stores({ agentEvents: 'id, chatId, messageId, [chatId+messageId]' });
+    this.version(4).stores({ agentResults: '[chatId+ref], chatId' });
   }
 }
 
@@ -296,7 +300,12 @@ export async function renameChat(id: string, title: string): Promise<void> {
 }
 
 export async function deleteChat(id: string): Promise<void> {
-  await db.chats.delete(id);
+  await db.transaction('rw', db.chats, db.agentEvents, db.agentResults, db.settings, async () => {
+    await db.agentEvents.where('chatId').equals(id).delete();
+    await db.agentResults.where('chatId').equals(id).delete();
+    await db.settings.delete(`agent-context:${id}`);
+    await db.chats.delete(id);
+  });
 }
 
 export async function appendMessage(
@@ -345,5 +354,10 @@ export async function patchLastMessage(
 export async function clearChatMessages(id: string): Promise<void> {
   const s = await db.chats.get(id);
   if (!s) return;
-  await db.chats.put({ ...s, messages: [], updatedAt: new Date().toISOString() });
+  await db.transaction('rw', db.chats, db.agentEvents, db.agentResults, db.settings, async () => {
+    await db.agentEvents.where('chatId').equals(id).delete();
+    await db.agentResults.where('chatId').equals(id).delete();
+    await db.settings.delete(`agent-context:${id}`);
+    await db.chats.put({ ...s, messages: [], summary: undefined, updatedAt: new Date().toISOString() });
+  });
 }

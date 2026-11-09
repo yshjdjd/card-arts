@@ -242,4 +242,9 @@ async def models(body: ProbeBody):
         ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
     except json.JSONDecodeError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "返回的不是 JSON") from e
-    return {"models": ids}
+    metadata = [
+        {"id": m.get("id"), "context_window": m.get("context_window") or m.get("context_length"),
+         "max_output_tokens": m.get("max_output_tokens")}
+        for m in (r.json().get("data") or []) if isinstance(m, dict) and m.get("id")
+    ]
+    return {"models": ids, "metadata": metadata}

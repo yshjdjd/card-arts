@@ -16,6 +16,7 @@ export interface NativeToolCall {
 }
 
 export interface SSEResult {
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   content: string;
   toolCalls: NativeToolCall[];
 }
@@ -31,6 +32,7 @@ export async function readSSE(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '', full = '', reason = '';
+  let usage: SSEResult['usage'];
   let dataLines: string[] = [];
   let ended = false;
   const toolCalls: NativeToolCall[] = [];
@@ -63,6 +65,7 @@ export async function readSSE(
     if (event.error) {
       throw new StreamError(typeof event.error === 'string' ? event.error : event.error.message || '模型服务发生错误', full);
     }
+    if (event.usage) usage = event.usage;
     const choice = event.choices?.[0];
     if (!choice) return; // usage-only events and heartbeats
     const delta = choice.delta?.content ?? choice.message?.content ?? '';
@@ -90,7 +93,7 @@ export async function readSSE(
     }
     if (!ended && !reason) throw new StreamError('连接提前结束，未收到模型完成信号；已保留收到的内容', full);
     onFinish?.(reason);
-    return { content: full, toolCalls: toolCalls.filter(Boolean) };
+    return { content: full, toolCalls: toolCalls.filter(Boolean), usage };
   } catch (error) {
     checkAbort();
     if (error instanceof StreamError) throw error;

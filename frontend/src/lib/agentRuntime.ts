@@ -1,4 +1,4 @@
-import { selectContext, type AgentMessage, type WireToolCall } from './agentContext';
+import { contextTokens, selectContext, type AgentMessage, type WireToolCall } from './agentContext';
 import {
   compressReply, formatCorrection, looksTruncated, MAX_ACTIONS_PER_ROUND,
   normalizeToolName, parseReply, salvageTruncatedCalls, tryParseJson,
@@ -9,6 +9,9 @@ import type { NativeToolCall } from './agentStream';
 
 export type RunStatus = 'completed' | 'round_limit' | 'output_limit' | 'invalid_output' | 'blocked';
 export interface RuntimeOptions {
+  onCheckpoint?: (messages: AgentMessage[]) => Promise<void>;
+  onContext?: (stats: { dropped: number; estimatedTokens: number }) => void;
+  toolTokens?: number;
   userText: string;
   history: AgentMessage[];
   system: () => Promise<string>;
@@ -50,7 +53,9 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
 
   for (let round = 0; round < maxRounds; round++) {
     if (options.signal?.aborted) throw new DOMException('aborted', 'AbortError');
-    const context = selectContext(await options.system(), options.history, current, options.contextWindow, options.outputTokens);
+    await options.onCheckpoint?.(structuredClone(current));
+    const context = selectContext(await options.system(), options.history, current, options.contextWindow, options.outputTokens + (options.toolTokens ?? 0));
+    options.onContext?.({ dropped: context.dropped, estimatedTokens: contextTokens(JSON.stringify(context.messages)) + (options.toolTokens ?? 0) });
     if (context.dropped && !contextNotice) {
       note(`ℹ️ 为保留当前任务的完整记录，本次未发送较早的 ${context.dropped} 条历史消息。`);
       contextNotice = true;
@@ -87,6 +92,7 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
         current.push({ role: 'assistant', content: compressReply(reply.content, parsed) });
       }
       note(`🔧 执行 ${allCalls.length} 个动作`);
+      await options.onCheckpoint?.(structuredClone(current));
       const result = await options.execute(allCalls);
       note(result.text);
       nativeCalls.forEach((x, i) => {
@@ -105,6 +111,7 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
           instruction,
         ].filter(Boolean).join('\n'),
       });
+      await options.onCheckpoint?.(structuredClone(current));
       return result.records.length > 0 && result.records.every((r) => r.status !== 'success');
     };
 
@@ -159,6 +166,8 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
         note('⚠️ 模型未返回正文或可执行动作，任务尚未确认完成。');
         return { status: 'invalid_output', rounds: round + 1 };
       }
+      current.push({ role: 'assistant', content: reply.content });
+      await options.onCheckpoint?.(structuredClone(current));
       return { status: 'completed', rounds: round + 1 };
     }
 

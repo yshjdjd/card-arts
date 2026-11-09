@@ -1,3 +1,4 @@
+import { resolveCapacity, modelScope, parseModelLimits, type ModelLimits } from './modelCapacity';
 /**
  * OpenAI 兼容的大模型客户端。
  *
@@ -39,7 +40,7 @@ export const LLM_PROVIDERS: LLMProvider[] = [
       kind: 'model',
       model: 'deepseek-reasoner',
       baseModel: 'deepseek-chat',
-      hint: '开启后模型名自动切成 deepseek-reasoner，关闭时切回原模型。注意：思维链（reasoning_content）占用同一个 max_tokens 额度，最多可到 32K，所以开启时建议把最大 Token 设到 16384 以上，否则思维链会先把配额吃光，正文和工具 JSON 反而被截断。思考模式下 temperature 不生效（传了也不报错）。',
+      hint: '开启后模型名自动切成 deepseek-reasoner，关闭时切回原模型。注意：思维链（reasoning_content）占用同一个 max_tokens 额度，上限取决于模型与接口；建议使用自动输出额度，否则思维链会先把配额吃光，正文和工具 JSON 反而被截断。思考模式下 temperature 不生效（传了也不报错）。',
     },
   },
   {
@@ -151,9 +152,9 @@ export function defaultLLMConfig(): LLMConfig {
     model: 'deepseek-chat',
     apiKey: '',
     temperature: 0.3,
-    // 助手要输出「说明文字 + 工具调用 JSON」，2048 经常不够（JSON 被截断就整个改不动），
-    // 默认给 4096：常规任务够用，又不至于每次都烧满额度
+    // 新配置自动选择额度；maxTokens 保留为手动值，旧配置继续按原值发送。
     maxTokens: 4096,
+    outputMode: 'auto',
     thinking: false,
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     useProxy: true,
@@ -237,6 +238,28 @@ export function clampMaxTokens(model: string, n: number): { value: number; cappe
     if (re.test(model.trim())) return { value: Math.min(n, cap), capped: n > cap };
   }
   return { value: Math.min(n, 32768), capped: n > 32768 };
+}
+
+/** One resolver for UI, input reservation and the actual wire payload. */
+export function resolveOutputBudget(cfg: LLMConfig, model=cfg.model, override?: number) {
+  const effective=resolveLLMConfig(cfg,model);
+  const name=effective.model;
+  const metadata=cfg.modelLimits?.scope===modelScope(cfg.baseUrl)?cfg.modelLimits.models[name]:undefined;
+  let cap:number, source:string;
+  if(metadata?.max_output_tokens && Number.isFinite(metadata.max_output_tokens) && metadata.max_output_tokens>0) {
+    cap=metadata.max_output_tokens;source='当前接口 /models 输出上限';
+  } else if(/^(?:deepseek\/)?(?:deepseek-v4(?:\.1)?-(?:pro|flash)(?:-\d{4})?|deepseek-flash)$/i.test(name)) {
+    cap=393216;source='DeepSeek 官方输出上限预设';
+  } else {
+    cap=clampMaxTokens(name,Number.MAX_SAFE_INTEGER).value;source='兼容预设 / 未知模型保守输出上限';
+  }
+  cap=Math.max(1,Math.min(Math.floor(cap),resolveCapacity(cfg,name).tokens-1024));
+  const thinking=thinkingState(effective).on;
+  const recommended=thinking?(effective.thinkingEffort==='max'?131072:65536):32768;
+  const automatic=override===undefined&&cfg.outputMode==='auto';
+  const requested=override??(automatic?recommended:cfg.maxTokens);
+  const valid=Number.isFinite(requested)&&requested>0?Math.floor(requested):4096;
+  return {value:Math.min(valid,cap),cap,capped:valid>cap,requested:valid,automatic,source};
 }
 
 /**
@@ -329,6 +352,7 @@ export interface ChatChunk {
 }
 
 export interface CompletionResult {
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   content: string;
   toolCalls: NativeToolCall[];
 }
@@ -372,7 +396,7 @@ function directPayload(params: ChatParams, stream: boolean) {
   const { cfg, messages, model, temperature, maxTokens } = params;
   const effective = resolveLLMConfig(cfg, model || cfg.model);
   const name = effective.model;
-  const { value: limit } = clampMaxTokens(name, maxTokens ?? cfg.maxTokens);
+  const { value: limit } = resolveOutputBudget(effective,name,maxTokens);
   const body: Record<string, unknown> = { model: name, messages, stream };
   if (isOA(name)) {
     // o1 / o3 / o4-mini：长度字段改名，且不接受 temperature（传了会 400）
@@ -499,7 +523,7 @@ async function readStreamResponse(res: Response, params: ChatParams): Promise<Co
     if (reasoning) params.onReasoning?.(reasoning);
     const content = message.content || '';
     if (content) params.onDelta?.(content);
-    return { content, toolCalls: convertToolCalls(message.tool_calls) };
+    return { content, toolCalls: convertToolCalls(message.tool_calls), usage: body.usage };
   }
   if (!res.body) throw new StreamError('模型返回空响应');
   return readSSE(res.body, params.onDelta, params.signal, params.onFinish, params.onReasoning, params.onToolCall);
@@ -577,11 +601,12 @@ export async function testConnection(cfg: LLMConfig): Promise<{ ok: boolean; msg
 }
 
 /** 拉取远端模型列表（GET {base}/models） */
-export async function fetchModels(cfg: LLMConfig): Promise<string[]> {
+export async function fetchModels(cfg: LLMConfig, onLimits?: (limits: Record<string, ModelLimits>) => void): Promise<string[]> {
   try {
     if (cfg.useProxy) {
       try {
         const r = await api.llmModels({ base_url: cfg.baseUrl, api_key: cfg.apiKey });
+        onLimits?.(parseModelLimits(r.metadata));
         return r.models ?? [];
       } catch (e) {
         if ((e as { status?: number }).status !== 0) throw e;
@@ -594,6 +619,7 @@ export async function fetchModels(cfg: LLMConfig): Promise<string[]> {
     });
     if (!res.ok) return [];
     const j = await res.json();
+    onLimits?.(parseModelLimits(j?.data));
     return (j?.data ?? []).map((x: { id: string }) => x.id).filter(Boolean);
   } catch {
     return [];

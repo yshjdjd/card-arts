@@ -72,6 +72,9 @@ export const TOOL_SPECS: ToolSpec[] = [
   { name: 'doc.append', level: 'write', doc: 'doc.append {doc(必填),content} → 末尾追加；目标必须是普通文档，表格文档请改用 doc.tableAddRow' },
   { name: 'doc.delete', level: 'destructive', doc: 'doc.delete {doc(必填)} → 删除文档' },
   { name: 'doc.read', level: 'read', doc: 'doc.read {doc(必填),offset?,limit?} → 按字符分页读文档；offset 从 0 起，默认读 2500 字符；按返回的 nextOffset 继续，表格可用 doc.tableRead' },
+  { name: 'conversation.readResult', level: 'read', doc: 'conversation.readResult {ref,offset?} → 分页读取当前会话保存的完整工具结果' },
+  { name: 'conversation.search', level: 'read', doc: 'conversation.search {query} → 搜索本会话原始历史，返回消息 id 与摘录' },
+  { name: 'conversation.readTurn', level: 'read', doc: 'conversation.readTurn {id,offset?} → 分段读取历史原文；压缩后需核对早期要求时使用' },
   { name: 'font.list', level: 'read', doc: 'font.list {} → 列出系统字体与项目已上传字体（key、名称）；使用前先查，不能编造字体 key' },
   { name: 'font.set', level: 'write', doc: 'font.set {font,deck?,side?,element?,setDefault?} → 设定字体；font 用 font.list 返回的 key 或精确名称；有 element 时只改该文字；有 deck 时改该牌组，否则改项目全部文字；side: front/back/both，默认 both；setDefault:true 同时设为新建文字默认字体' },
   { name: 'asset.list', level: 'read', doc: 'asset.list {limit?,kind?} → 列出素材库（kind=image/font 可只看图片或字体）' },
@@ -225,6 +228,9 @@ export const TOOL_PARAMS: Record<string, Record<string, unknown>> = {
   'doc.append': obj({ doc: S.doc, content: S.str }, ['doc', 'content']),
   'doc.delete': obj({ doc: S.doc }, ['doc']),
   'doc.read': obj({ doc: S.doc, offset: S.num, limit: S.num }, ['doc']),
+  'conversation.readResult': obj({ ref: S.str, offset: S.num }, ['ref']),
+  'conversation.search': obj({ query: S.str }, ['query']),
+  'conversation.readTurn': obj({ id: S.str, offset: S.num }, ['id']),
   'font.list': obj({}),
   'font.set': obj({ font: S.str, deck: S.deck, side: S.side, element: S.element, setDefault: S.bool }, ['font']),
   'asset.list': obj({ limit: S.num, kind: { type: 'string', enum: ['image', 'font'] } }),
@@ -780,6 +786,9 @@ export type AgentAction = (args: Record<string, unknown>, signal?: AbortSignal) 
 export type AgentActions = Record<string, AgentAction>;
 
 export interface RunOptions {
+  beforeCall?: (call: ToolCall) => Promise<void>;
+  afterCall?: (call: ToolCall) => Promise<void>;
+  storeResult?: (tool: string, content: string) => Promise<string>;
   signal?: AbortSignal;
   readConcurrency?: number;
   onRecord?: (record: ToolRecord) => void;
@@ -883,8 +892,18 @@ export async function runToolCalls(
     const previous = REPLAY_PROTECTED.has(c.tool) ? opts.journal?.get(key) : undefined;
     if (previous !== undefined) return record(c, 'replayed', `↪ 已执行，未重复写入：${previous}`);
     try {
+      await opts.beforeCall?.(c);
+      checkAbort();
       const raw = await fn(c.args ?? {}, opts.signal);
-      const result = clip(`[${c.tool}] ${raw}`, maxResultChars);
+      if (!raw.trimStart().startsWith('❌')) await opts.afterCall?.(c);
+      const full = `[${c.tool}] ${raw}`;
+      let result = clip(full, maxResultChars);
+      if (full.length > maxResultChars && opts.storeResult) {
+        try {
+        const ref = await opts.storeResult(c.tool, full);
+        result = full.slice(0, Math.min(maxResultChars, 2400)) + `\n完整结果已保存，共 ${full.length} 字。用 conversation.readResult {ref:"${ref}",offset:0} 分页读取；不要重复执行原写操作。`;
+        } catch { result += "\n⚠️ 完整结果保存失败；原工具已返回，不要因此重复写操作。"; }
+      }
       const failed = raw.trimStart().startsWith('❌');
       if (!failed && REPLAY_PROTECTED.has(c.tool)) opts.journal?.set(key, result);
       return record(c, failed ? 'error' : 'success', result);

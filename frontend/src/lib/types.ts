@@ -264,6 +264,8 @@ export interface LLMProvider {
 export interface LLMConfig {
   /** Actual model context capacity (input + output). Defaults to 65536 for old settings. */
   contextWindow?: number;
+  contextMode?: 'auto' | 'manual';
+  modelLimits?: { scope: string; models: Record<string, import('./modelCapacity').ModelLimits> };
   enabled: boolean;
   /** 厂商 key；custom 表示完全自定义 */
   provider: string;
@@ -272,6 +274,7 @@ export interface LLMConfig {
   apiKey: string;
   temperature: number;
   maxTokens: number;
+  outputMode?: 'auto' | 'manual';
   systemPrompt?: string;
   /** true = 请求经由本地后端转发（规避跨域，密钥不出本机） */
   useProxy: boolean;
@@ -290,6 +293,8 @@ export interface LLMConfig {
 
 export interface ChatMessage {
   agentRun?: {
+    messages?: import('./agentContext').AgentMessage[];
+    context?: { dropped: number; estimatedTokens: number };
     status: string;
     records: import('./agentProtocol').ToolRecord[];
   };
@@ -345,6 +350,12 @@ export interface AgentContext {
 }
 
 export interface ChatSession {
+  autoCompact?: boolean;
+  compactThreshold?: number;
+  summary?: { text: string; throughMessageId: string; createdAt: string; model: string };
+  pinnedMemory?: string;
+  parentSessionId?: string;
+  forkMessageId?: string;
   id: string;
   projectId: string;
   title: string;

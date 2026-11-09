@@ -1105,6 +1105,9 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
     const custom = (await listProjectAssets(ctx)).filter((a) => a.kind === 'font');
     return [...FONTS.map((f) => ({ id: f.key, name: f.name })), ...custom.map((f) => ({ id: fontKey(f.id), name: f.name }))];
   };
+  A['conversation.readResult'] = async () => '❌ 结果查询仅在会话运行中可用';
+  A['conversation.search'] = async () => '历史查询仅在会话运行中可用';
+  A['conversation.readTurn'] = async () => '历史查询仅在会话运行中可用';
   A['font.list'] = async () => (await availableFonts()).map((f) => `${f.name} [key=${f.id}]`).join('\n');
   A['font.set'] = async (a) => {
     if (!norm(a.font)) return '❌ 缺少 font，请先 font.list';
