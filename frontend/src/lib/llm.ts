@@ -1,3 +1,4 @@
+import { resolveCapacity, modelScope, parseModelLimits, type ModelLimits } from './modelCapacity';
 /**
  * OpenAI 兼容的大模型客户端。
  *
@@ -8,7 +9,8 @@
  * 所有厂商统一走 POST {base}/chat/completions，请求/响应结构与 OpenAI 一致。
  */
 import { API_BASE, api } from '../api/client';
-import { readSSE, StreamError } from './agentStream';
+import { readSSE, StreamError, type NativeToolCall } from './agentStream';
+import type { ToolDefinition } from './agentProtocol';
 import type { ChatMessage, LLMConfig, LLMProvider, ThinkingSpec } from './types';
 
 /* ---------------- 厂商预设 ---------------- */
@@ -38,7 +40,7 @@ export const LLM_PROVIDERS: LLMProvider[] = [
       kind: 'model',
       model: 'deepseek-reasoner',
       baseModel: 'deepseek-chat',
-      hint: '开启后模型名自动切成 deepseek-reasoner，关闭时切回原模型。注意：思维链（reasoning_content）占用同一个 max_tokens 额度，最多可到 32K，所以开启时建议把最大 Token 设到 16384 以上，否则思维链会先把配额吃光，正文和工具 JSON 反而被截断。思考模式下 temperature 不生效（传了也不报错）。',
+      hint: '开启后模型名自动切成 deepseek-reasoner，关闭时切回原模型。注意：思维链（reasoning_content）占用同一个 max_tokens 额度，上限取决于模型与接口；建议使用自动输出额度，否则思维链会先把配额吃光，正文和工具 JSON 反而被截断。思考模式下 temperature 不生效（传了也不报错）。',
     },
   },
   {
@@ -150,9 +152,9 @@ export function defaultLLMConfig(): LLMConfig {
     model: 'deepseek-chat',
     apiKey: '',
     temperature: 0.3,
-    // 助手要输出「说明文字 + 工具调用 JSON」，2048 经常不够（JSON 被截断就整个改不动），
-    // 默认给 4096：常规任务够用，又不至于每次都烧满额度
+    // 新配置自动选择额度；maxTokens 保留为手动值，旧配置继续按原值发送。
     maxTokens: 4096,
+    outputMode: 'auto',
     thinking: false,
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     useProxy: true,
@@ -236,6 +238,28 @@ export function clampMaxTokens(model: string, n: number): { value: number; cappe
     if (re.test(model.trim())) return { value: Math.min(n, cap), capped: n > cap };
   }
   return { value: Math.min(n, 32768), capped: n > 32768 };
+}
+
+/** One resolver for UI, input reservation and the actual wire payload. */
+export function resolveOutputBudget(cfg: LLMConfig, model=cfg.model, override?: number) {
+  const effective=resolveLLMConfig(cfg,model);
+  const name=effective.model;
+  const metadata=cfg.modelLimits?.scope===modelScope(cfg.baseUrl)?cfg.modelLimits.models[name]:undefined;
+  let cap:number, source:string;
+  if(metadata?.max_output_tokens && Number.isFinite(metadata.max_output_tokens) && metadata.max_output_tokens>0) {
+    cap=metadata.max_output_tokens;source='当前接口 /models 输出上限';
+  } else if(/^(?:deepseek\/)?(?:deepseek-v4(?:\.1)?-(?:pro|flash)(?:-\d{4})?|deepseek-flash)$/i.test(name)) {
+    cap=393216;source='DeepSeek 官方输出上限预设';
+  } else {
+    cap=clampMaxTokens(name,Number.MAX_SAFE_INTEGER).value;source='兼容预设 / 未知模型保守输出上限';
+  }
+  cap=Math.max(1,Math.min(Math.floor(cap),resolveCapacity(cfg,name).tokens-1024));
+  const thinking=thinkingState(effective).on;
+  const recommended=thinking?(effective.thinkingEffort==='max'?131072:65536):32768;
+  const automatic=override===undefined&&cfg.outputMode==='auto';
+  const requested=override??(automatic?recommended:cfg.maxTokens);
+  const valid=Number.isFinite(requested)&&requested>0?Math.floor(requested):4096;
+  return {value:Math.min(valid,cap),cap,capped:valid>cap,requested:valid,automatic,source};
 }
 
 /**
@@ -327,12 +351,28 @@ export interface ChatChunk {
   done: boolean;
 }
 
+export interface CompletionResult {
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  content: string;
+  toolCalls: NativeToolCall[];
+}
+
+/** 线格式消息：含原生工具调用（assistant.tool_calls）与工具结果（role:tool） */
+export type WireMessage = {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  tool_calls?: Array<{ id: string; type?: 'function'; function: { name: string; arguments: string } }>;
+  tool_call_id?: string;
+};
+
 export interface ChatParams {
   cfg: LLMConfig;
-  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  messages: WireMessage[];
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  /** 原生 function calling 工具定义；给出后请求带 tools / tool_choice */
+  tools?: ToolDefinition[];
   onDelta?: (text: string) => void;
   /**
    * 上游给的结束原因：`length` = 被 max_tokens 掐断（要提示用户调大），
@@ -341,6 +381,8 @@ export interface ChatParams {
   onFinish?: (reason: string) => void;
   /** 思考过程增量（开启思考模式时才有，和正文分开） */
   onReasoning?: (text: string) => void;
+  /** 原生工具调用增量（流式累积） */
+  onToolCall?: (calls: NativeToolCall[]) => void;
   signal?: AbortSignal;
 }
 
@@ -354,7 +396,7 @@ function directPayload(params: ChatParams, stream: boolean) {
   const { cfg, messages, model, temperature, maxTokens } = params;
   const effective = resolveLLMConfig(cfg, model || cfg.model);
   const name = effective.model;
-  const { value: limit } = clampMaxTokens(name, maxTokens ?? cfg.maxTokens);
+  const { value: limit } = resolveOutputBudget(effective,name,maxTokens);
   const body: Record<string, unknown> = { model: name, messages, stream };
   if (isOA(name)) {
     // o1 / o3 / o4-mini：长度字段改名，且不接受 temperature（传了会 400）
@@ -363,11 +405,27 @@ function directPayload(params: ChatParams, stream: boolean) {
     body.max_tokens = limit;
     if (!noTemperature(name)) body.temperature = temperature ?? cfg.temperature;
   }
+  if (params.tools?.length) {
+    // 原生 function calling：工具定义结构化下发，不再让模型把调用写进正文
+    body.tools = params.tools;
+    body.tool_choice = 'auto';
+  }
   return { ...body, ...thinkingFields(effective) };
 }
 
+/** 把上游完整的 tool_calls 转成统一结构 */
+function convertToolCalls(raw: unknown): NativeToolCall[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((tc, i) => ({
+    index: Number(tc?.index ?? i),
+    id: tc?.id ?? `call_${i}`,
+    name: tc?.function?.name ?? '',
+    arguments: tc?.function?.arguments ?? '',
+  }));
+}
+
 /** 非流式：一次性拿完整回复。代理通道失败（后端没起）会自动退回直连。 */
-export async function chatComplete(params: ChatParams): Promise<string> {
+export async function chatComplete(params: ChatParams): Promise<CompletionResult> {
   const { cfg, signal, onFinish, onReasoning } = params;
   const payload = directPayload(params, false);
 
@@ -381,11 +439,13 @@ export async function chatComplete(params: ChatParams): Promise<string> {
         temperature: payload.temperature as number | undefined,
         max_tokens: payload.max_tokens as number | undefined,
         max_completion_tokens: payload.max_completion_tokens as number | undefined,
+        tools: payload.tools,
+        tool_choice: payload.tool_choice as string | undefined,
         extra: thinkingFields({ ...cfg, model: String(payload.model) }),
       }, signal);
       onFinish?.(res.finish_reason ?? '');
       if (res.reasoning) onReasoning?.(res.reasoning);
-      return res.content ?? '';
+      return { content: res.content ?? '', toolCalls: convertToolCalls(res.tool_calls) };
     } catch (e) {
       // status 0 = 连不上本地后端（多半没启动），退回直连再试
       const status = (e as { status?: number }).status;
@@ -405,16 +465,17 @@ export async function chatComplete(params: ChatParams): Promise<string> {
   });
   if (!res.ok) throw new Error(`模型返回 ${res.status}：${(await res.text()).slice(0, 300)}`);
   const body = await res.json();
-  onFinish?.(body?.choices?.[0]?.finish_reason ?? '');
-  const msg = body?.choices?.[0]?.message ?? {};
+  const choice = body?.choices?.[0] ?? {};
+  onFinish?.(choice.finish_reason ?? '');
+  const msg = choice.message ?? {};
   const rc: string = msg?.reasoning_content ?? msg?.reasoning ?? '';
   if (rc) onReasoning?.(rc);
-  return msg?.content ?? '';
+  return { content: msg?.content ?? '', toolCalls: convertToolCalls(msg?.tool_calls) };
 }
 
 /** 代理通道的流式：后端把上游 SSE 原样透传回来，前端逐字渲染 */
-async function proxyStream(params: ChatParams): Promise<string> {
-  const { cfg, onDelta, signal, onFinish, onReasoning } = params;
+async function proxyStream(params: ChatParams): Promise<CompletionResult> {
+  const { cfg, signal } = params;
   const payload = directPayload(params, true);
 
   let res: Response;
@@ -431,6 +492,8 @@ async function proxyStream(params: ChatParams): Promise<string> {
         temperature: payload.temperature,
         max_tokens: payload.max_tokens,
         max_completion_tokens: payload.max_completion_tokens,
+        tools: payload.tools,
+        tool_choice: payload.tool_choice,
         stream: true,
         extra: thinkingFields({ ...cfg, model: String(payload.model) }),
       }),
@@ -448,7 +511,7 @@ async function proxyStream(params: ChatParams): Promise<string> {
 }
 
 /** Some compatible gateways return JSON even when stream=true; consume that same response. */
-async function readStreamResponse(res: Response, params: ChatParams): Promise<string> {
+async function readStreamResponse(res: Response, params: ChatParams): Promise<CompletionResult> {
   if (/application\/json/i.test(res.headers.get('content-type') || '')) {
     const body = await res.json();
     if (body.error) throw new StreamError(typeof body.error === 'string' ? body.error : body.error.message || '模型服务发生错误');
@@ -460,15 +523,15 @@ async function readStreamResponse(res: Response, params: ChatParams): Promise<st
     if (reasoning) params.onReasoning?.(reasoning);
     const content = message.content || '';
     if (content) params.onDelta?.(content);
-    return content;
+    return { content, toolCalls: convertToolCalls(message.tool_calls), usage: body.usage };
   }
   if (!res.body) throw new StreamError('模型返回空响应');
-  return readSSE(res.body, params.onDelta, params.signal, params.onFinish, params.onReasoning);
+  return readSSE(res.body, params.onDelta, params.signal, params.onFinish, params.onReasoning, params.onToolCall);
 }
 
 /** 直连通道的流式 */
-async function directStream(params: ChatParams): Promise<string> {
-  const { cfg, onDelta, signal, onFinish, onReasoning } = params;
+async function directStream(params: ChatParams): Promise<CompletionResult> {
+  const { cfg, signal } = params;
   const payload = directPayload(params, true);
 
   let res: Response;
@@ -493,7 +556,7 @@ async function directStream(params: ChatParams): Promise<string> {
 }
 
 /** 流式：逐段把文字交给 onDelta（失败自动降级为非流式） */
-export async function chatStream(params: ChatParams): Promise<string> {
+export async function chatStream(params: ChatParams): Promise<CompletionResult> {
   // Only fetch failures before receiving a response may switch channels.
   // Empty completions, upstream errors and interrupted streams must not trigger another generation.
   return params.cfg.useProxy ? proxyStream(params) : directStream(params);
@@ -513,7 +576,7 @@ export async function testConnection(cfg: LLMConfig): Promise<{ ok: boolean; msg
       messages: [{ role: 'user', content: 'hi' }],
       maxTokens: 16,
     });
-    return { ok: true, msg: `连通正常（${Date.now() - t0}ms）：${text.slice(0, 40) || '已响应'}` };
+    return { ok: true, msg: `连通正常（${Date.now() - t0}ms）：${text.content.slice(0, 40) || '已响应'}` };
   };
 
   try {
@@ -538,11 +601,12 @@ export async function testConnection(cfg: LLMConfig): Promise<{ ok: boolean; msg
 }
 
 /** 拉取远端模型列表（GET {base}/models） */
-export async function fetchModels(cfg: LLMConfig): Promise<string[]> {
+export async function fetchModels(cfg: LLMConfig, onLimits?: (limits: Record<string, ModelLimits>) => void): Promise<string[]> {
   try {
     if (cfg.useProxy) {
       try {
         const r = await api.llmModels({ base_url: cfg.baseUrl, api_key: cfg.apiKey });
+        onLimits?.(parseModelLimits(r.metadata));
         return r.models ?? [];
       } catch (e) {
         if ((e as { status?: number }).status !== 0) throw e;
@@ -555,6 +619,7 @@ export async function fetchModels(cfg: LLMConfig): Promise<string[]> {
     });
     if (!res.ok) return [];
     const j = await res.json();
+    onLimits?.(parseModelLimits(j?.data));
     return (j?.data ?? []).map((x: { id: string }) => x.id).filter(Boolean);
   } catch {
     return [];

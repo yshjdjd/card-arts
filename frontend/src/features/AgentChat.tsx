@@ -1,3 +1,4 @@
+import { resolveCapacity, autoCompactThreshold, modelScope } from '../lib/modelCapacity';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useProject } from '../state/store';
@@ -8,16 +9,26 @@ import {
   updateChatContext, updateChatTodos,
 } from '../db/schema';
 import {
-  applyThinkingToggle, chatStream, clampMaxTokens, fetchModels, isReasonerName,
+  applyThinkingToggle, chatStream, resolveOutputBudget, fetchModels, isReasonerName,
   LLM_PROVIDERS, providerByKey, testConnection, thinkingSpecOf, thinkingState, resolveLLMConfig,
   DEFAULT_SYSTEM_PROMPT,
 } from '../lib/llm';
 import {
-  buildSystemPrompt, callKey, createAgentActions, describeCall, estimateTokens,
+  buildSystemPrompt, buildToolDefinitions, callKey, createAgentActions, describeCall, estimateTokens,
   projectOverview, runToolCalls, TOOL_NAMES,
   type AgentActions, type PromptRef, type ToolCall,
 } from '../lib/agentTools';
+import { compactSession } from '../lib/agentCompaction';
+import { ContextDashboard } from './ContextDashboard';
+import { RevisionGuard } from '../lib/agentRevision';
+import { levelOf } from '../lib/agentProtocol';
+import { saveToolResult, resultTools } from '../db/agentResults';
+import { saveAgentItems, hydrateAgentItems } from '../db/agentEvents';
+import { taskMemory, forkSession, summaryCandidates } from '../lib/agentMemory';
+import { restoreHistory, historyTools } from '../lib/agentHistory';
+import { contextTokens, type AgentMessage } from '../lib/agentContext';
 import { runAgent } from '../lib/agentRuntime';
+import { fetchRemoteTools, buildMcpActions } from '../lib/mcp';
 import type { RunResult, ToolRecord } from '../lib/agentProtocol';
 import { allSkills, defaultSkillKeys } from '../lib/skills';
 import type { AgentContext, ChatSession, LLMConfig, ProjectDocument, SkillDef, TodoItem } from '../lib/types';
@@ -57,9 +68,23 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<'chats' | 'context' | 'config'>('chats');
   const boxRef = useRef<HTMLDivElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  // 窗口位置：null 时走 CSS 默认（右下角），拖过之后用绝对坐标
+  const [winPos, setWinPos] = useState<{ x: number; y: number } | null>(null);
+  const winDrag = useRef<{ active: boolean; dx: number; dy: number; moved: boolean }>({
+    active: false, dx: 0, dy: 0, moved: false,
+  });
   const abortRef = useRef<AbortController | null>(null);
   const runLock = useRef(false);
   useEffect(() => () => abortRef.current?.abort(), [projectId]);
+
+  // textarea 随内容自动增高（上限由 CSS max-height 控制）
+  useEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+  }, [input]);
 
   /** 危险操作确认（三选一：拒绝 / 允许一次 / 本次会话都允许） */
   const [approveReq, setApproveReq] = useState<{
@@ -163,12 +188,13 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
         title: `${d.title} [id=${d.id}]${d.kind === 'table' ? '（表格）' : ''}`,
         content: d.content || '（空文档）',
       }));
-    return buildSystemPrompt({
+    return (liveChat ? taskMemory(liveChat) + "\n\n" : "") + buildSystemPrompt({
       snapshot,
       skills,
       docs: refs,
       todos: (liveChat?.todos ?? active?.todos ?? []).map((t) => ({ text: t.text, status: t.status })),
       web: agentCtx.web !== false,
+      nativeTools: true,
       extra: cfg?.systemPrompt?.trim() || undefined,
     });
   }, [projectId, project?.name, update, rename, agentCtx, docs, activeId, active?.todos, cfg?.systemPrompt]);
@@ -231,7 +257,12 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
     const text = input.trim();
     if (!text || busy || runLock.current) return;
     if (!projectId) { toast('请先打开一个项目', 'err'); return; }
-    const chat = active;
+    if (!cfg) { toast('模型配置还在加载', 'info'); return; }
+    runLock.current = true;
+    let chat: ChatSession | null;
+    try { chat = active ? await hydrateAgentItems(active) : null; }
+    catch { runLock.current = false; toast('读取会话检查点失败，请重试', 'err'); return; }
+    if (!chat) runLock.current = false;
     if (!chat) { toast('还没有会话，先点左上角「+ 新会话」', 'err'); return; }
     if (!cfg) { toast('模型配置还在加载，稍等一下', 'info'); return; }
 
@@ -255,6 +286,8 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
       }
     }
     let runStatus = 'running';
+    let savedItems = 0;
+    let contextStats: { dropped: number; estimatedTokens: number } | undefined;
 
     // 串行写盘，避免流式节流时多个 patch 互相覆盖
     let chain: Promise<unknown> = Promise.resolve();
@@ -268,7 +301,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
       lastFlush = now;
       const r = think;
       const content = acc;
-      const run = { status: runStatus, records: records.map((x) => ({ ...x })) };
+      const run = { status: runStatus, context: contextStats, records: records.map((x) => ({ ...x })) };
       chain = chain.then(() => patchLastMessage(chatId, content, r, messageId, run)).catch((error) => { storageError = error; });
     };
 
@@ -276,8 +309,13 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
     abortRef.current = ctrl;
 
     /** 执行一批工具调用，并把「本次会话都允许」的授权写回会话 */
+    let revisionGuard: RevisionGuard;
+    let effectiveActions: AgentActions = actions;
     const run = async (calls: ToolCall[]): Promise<RunResult> => {
-      const res = await runToolCalls(calls, actions, {
+      const res = await runToolCalls(calls, effectiveActions, {
+        beforeCall: async (call) => revisionGuard.before((await db.projects.get(projectId))?.localRevision, levelOf(call.tool) === 'read'),
+        afterCall: async (call) => revisionGuard.after((await db.projects.get(projectId))?.localRevision, levelOf(call.tool) === 'read' && /^(project\.|deck\.|card\.|field\.|layout\.|element\.)/.test(call.tool)),
+        storeResult: (tool, content) => saveToolResult(chatId, tool, content),
         approve: askApprove,
         approved: runApproved,
         signal: ctrl.signal,
@@ -292,9 +330,14 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
     };
 
     try {
+      revisionGuard = new RevisionGuard((await db.projects.get(projectId))?.localRevision);
       await appendMessage(chatId, { role: 'user', content: text });
       messageId = await appendMessage(chatId, { role: 'assistant', content: '' });
       if (!messageId) throw new Error('会话已不存在，无法开始任务');
+      // Persist before discovery/compaction too: either can be interrupted before runAgent.
+      write(true);
+      await chain;
+      if (storageError) throw storageError;
       if (!cfg.enabled) {
         // 规则模式：把固定指令映射到同一套工具上
         const calls = localRule(text);
@@ -324,18 +367,48 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
       }
 
       const model = resolveLLMConfig(cfg, chat.modelOverride || cfg.model).model;
-      const outputTokens = clampMaxTokens(model, cfg.maxTokens).value;
+      const outputTokens = resolveOutputBudget(cfg,model).value;
+      // 拉取外部 MCP server 提供的工具（拉不到就静默退化为仅核心工具）
+      const remote = await fetchRemoteTools(ctrl.signal);
+      effectiveActions = { ...actions, ...buildMcpActions(remote.tools), ...historyTools(chat.messages), ...resultTools(chatId) };
+      let modelHistory = chat.messages;
+      const oldSummaryIndex = chat.summary ? chat.messages.findIndex((m) => m.id === chat.summary!.throughMessageId) : -1;
+      const pendingHistory = chat.messages.slice(oldSummaryIndex + 1);
+      if (chat.autoCompact !== false && pendingHistory.length > 8 && contextTokens(JSON.stringify(pendingHistory)) > (chat.compactThreshold || autoCompactThreshold(resolveCapacity(cfg, model).tokens))) {
+        try {
+          const summary = await compactSession(chat, resolveCapacity(cfg, model).tokens, model, async (messages) => {
+            let text = '', reason = '';
+            await chatStream({cfg, maxTokens:1800,model,signal:ctrl.signal,messages,onDelta:d=>{text+=d;},onFinish:r=>{reason=r;}});
+            return {text,reason};
+          });
+          if (ctrl.signal.aborted) throw new DOMException('aborted','AbortError');
+          await db.chats.update(chatId,{summary}); chat.summary=summary;
+        } catch (error) { if (ctrl.signal.aborted) throw error; }
+      }
+      const summaryIndex = chat.summary ? chat.messages.findIndex((m)=>m.id===chat.summary!.throughMessageId) : -1;
+      if (summaryIndex >= 0) modelHistory = chat.messages.slice(summaryIndex + 1);
       const result = await runAgent({
         userText: text,
-        history: chat.messages.map((m) => ({ role: m.role, content: m.agentRun ? `${m.content}\n\n执行状态：${m.agentRun.status}\n${m.agentRun.records.map((r) => `${r.tool} ${r.status}: ${r.content}`).join('\n')}` : m.content })),
+        history: restoreHistory(modelHistory),
+        toolTokens: contextTokens(JSON.stringify(buildToolDefinitions(remote.defs))),
+        onCheckpoint: async (messages) => { if (!messageId) throw new Error("缺少运行 ID"); savedItems = await saveAgentItems(chatId, messageId, messages, savedItems); write(true); await chain; if (storageError) throw storageError; },
+        onContext: (stats) => { contextStats = stats; },
         system: buildPrompt,
         outputTokens,
-        contextWindow: cfg.contextWindow || 65536,
+        contextWindow: resolveCapacity(cfg, model).tokens,
         signal: ctrl.signal,
-        complete: (messages, onDelta, onFinish) => chatStream({
+        complete: async (messages, onDelta, onFinish) => {
+          const key = `agent-context:${chatId}`;
+          const snapshot = {messages,tools:buildToolDefinitions(remote.defs),model,createdAt:new Date().toISOString(),window:resolveCapacity(cfg, model).tokens,outputTokens};
+          await db.settings.put({key,value:snapshot});
+          const completion = await chatStream({
           cfg, messages, model, signal: ctrl.signal, onDelta, onFinish,
+          tools: buildToolDefinitions(remote.defs),
           onReasoning: (delta) => { think += delta; write(); },
-        }),
+          });
+          await db.settings.put({key,value:{...snapshot,usage:completion.usage}});
+          return completion;
+        },
         execute: run,
         onText: (value) => { acc = value; write(); },
       });
@@ -484,7 +557,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
     await saveCfg(active?.modelOverride ? { ...next, model: cfg.model } : next);
     toast(
       on
-        ? `已开启思考模式（最大 Token 提到 ${next.maxTokens}，思考内容也占额度）`
+        ? `已开启思考模式（实际输出额度 ${resolveOutputBudget(next,next.model).value}，思考内容也占额度）`
         : '已关闭思考模式',
       'info',
     );
@@ -501,8 +574,33 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
   const doneTodos = todos.filter((t) => t.status === 'done').length;
 
   return (
-    <div className="chat-win wide">
-      <div className="hd">
+    <div
+      className="chat-win wide"
+      style={winPos ? { left: winPos.x, top: winPos.y, right: 'auto', bottom: 'auto' } : undefined}
+    >
+      <div
+        className="hd"
+        style={{ cursor: 'grab', touchAction: 'none', userSelect: 'none' }}
+        onPointerDown={(e) => {
+          if (e.button !== 0 || (e.target as Element).closest('button, input, select, textarea, a, [role="button"]')) return;
+          const rect = e.currentTarget.parentElement!.getBoundingClientRect();
+          winDrag.current = { active: true, dx: e.clientX - rect.left, dy: e.clientY - rect.top, moved: false };
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          if (!winDrag.current.active) return;
+          const nx = Math.min(Math.max(8, e.clientX - winDrag.current.dx), window.innerWidth - 200);
+          const ny = Math.min(Math.max(8, e.clientY - winDrag.current.dy), window.innerHeight - 80);
+          winDrag.current.moved = true;
+          setWinPos({ x: nx, y: ny });
+        }}
+        onPointerUp={(e) => {
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+          winDrag.current.active = false;
+        }}
+        onPointerCancel={() => { winDrag.current.active = false; }}
+        onLostPointerCapture={() => { winDrag.current.active = false; }}
+      >
         <span style={{ flex: 1, fontWeight: 600 }}>🤖 项目助手</span>
         <button className={`btn sm ${tab === 'chats' ? '' : 'ghost'}`} onClick={() => setTab('chats')}>会话</button>
         <button className={`btn sm ${tab === 'context' ? '' : 'ghost'}`} onClick={() => setTab('context')}>
@@ -611,8 +709,11 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
                 )}
                 {active?.messages.map((m) => (
                   <div key={m.id} className={`msg ${m.role === 'user' ? 'me' : m.role === 'system' ? 'sys' : 'ai'}`}>
+                    {!busy && <button className="btn ghost sm" onClick={() => { void db.chats.get(active.id).then(async (current) => { if (!current) return; const fork = forkSession(await hydrateAgentItems(current), m.id, crypto.randomUUID()); await db.transaction('rw', db.chats, db.agentResults, async () => { const rows = await db.agentResults.where('chatId').equals(current.id).toArray(); await db.agentResults.bulkPut(rows.map((r) => ({...r, chatId: fork.id}))); await db.chats.put(fork); }); setActiveId(fork.id); }); }}>从此处分支</button>}
                     {m.reasoning ? <ThinkingBlock text={m.reasoning} streaming={busy} /> : null}
                     {m.content || (busy ? '…' : '')}
+                    {!busy && m.agentRun?.status === 'running' && <div className="small faint">上次运行已中断。可发送“继续”，先核对工程状态。</div>}
+                    {m.agentRun?.context && <div className="small faint">本轮上下文约 {m.agentRun.context.estimatedTokens} tokens（含工具定义，估算）；未发送较早历史 {m.agentRun.context.dropped} 条，可查询原文。</div>}
                     {!!m.agentRun?.records.length && (
                       <details className="small mt8">
                         <summary>执行记录（{m.agentRun.records.length}）</summary>
@@ -626,6 +727,8 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
               </div>
 
               <div className="inp-wrap">
+                {active?.summary && <details className="small"><summary>自动摘要 · {active.summary.createdAt}</summary><div style={{whiteSpace:'pre-wrap'}}>{active.summary.text}</div><button className="btn ghost sm" disabled={busy} onClick={() => void db.chats.update(active.id, {summary: undefined})}>清除摘要，重新读取原历史</button></details>}
+                {!busy && active && <button className="btn ghost sm" onClick={() => { const value = window.prompt('固定任务约束（每轮保留；清空可移除）', active.pinnedMemory ?? ''); if (value !== null) void db.chats.update(active.id, { pinnedMemory: value.slice(0, 4000) }); }}>任务记忆 / 固定约束</button>}
                 {mention && mentionItems.length > 0 && (
                   <div className="mention-pop">
                     {mentionItems.map((it, i) => (
@@ -642,8 +745,10 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
                   </div>
                 )}
                 <div className="inp">
-                  <input
+                  <textarea
+                    ref={taRef}
                     className="input"
+                    rows={1}
                     placeholder={cfg?.enabled ? '说点什么（@ 挂载文档，回车发送，Shift+Enter 换行）' : '规则模式：新增一张卡牌 XXX / 统计一下'}
                     value={input}
                     onChange={(e) => onInputChange(e.target.value)}
@@ -670,6 +775,8 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
             </div>
           </>
         ) : tab === 'context' ? (
+          <div style={{overflowY:'auto',flex:1,minHeight:0}}>
+          <ContextDashboard chat={active} cfg={cfg} busy={busy} input={input} buildPrompt={buildPrompt} />
           <ContextPanel
             ctx={agentCtx}
             docs={docs}
@@ -677,6 +784,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
             onChange={(p) => void setCtx(p)}
             onBack={() => setTab('chats')}
           />
+          </div>
         ) : (
           <LLMConfigPanel
             cfg={cfg}
@@ -936,6 +1044,7 @@ function ContextPanel({
  */
 export function toggleThinking(cfg: LLMConfig, on: boolean): LLMConfig {
   const next = applyThinkingToggle(cfg, on);
+  if (next.outputMode === 'auto' || next.outputMode === 'manual') return next;
   // 思维链和正文共用 max_tokens：DeepSeek 光思维链就能吃掉 32K，给足一点
   const target = thinkingSpecOf(cfg).kind === 'model' ? 16384 : 8192;
   if (on && next.maxTokens < target) return { ...next, maxTokens: target };
@@ -1015,7 +1124,7 @@ function LLMConfigPanel({
   const mode = thinkingState(effective);
   const thinkOn = mode.on === true;
   // 超过模型自身输出上限会被厂商 400，这里提前夹住并提示
-  const cap = clampMaxTokens(effective.model, cfg.maxTokens);
+  const cap = resolveOutputBudget(cfg,effective.model);
 
   // 必填项是否齐了（有些本地服务不需要 key，所以 key 只提示不拦截）
   const ready = Boolean(cfg.baseUrl.trim() && cfg.model.trim());
@@ -1054,12 +1163,14 @@ function LLMConfigPanel({
   const onFetchModels = async () => {
     setLoadingModels(true);
     try {
-      const list = await fetchModels(cfg);
+      let discovered: LLMConfig['modelLimits'];
+      const list = await fetchModels(cfg, (models) => {discovered={scope:modelScope(cfg.baseUrl),models};});
+      if(discovered) patch({modelLimits:discovered,...(!cfg.model.trim()&&list.length?{model:list[0]}:{})});
       if (!list.length) {
         toast('没拉到模型列表，可手动填写模型名', 'info');
       } else {
         setModels(list);
-        if (!cfg.model.trim()) patch({ model: list[0] });
+        if (!cfg.model.trim()&&!discovered) patch({ model: list[0] });
       }
     } finally {
       setLoadingModels(false);
@@ -1141,27 +1252,30 @@ function LLMConfigPanel({
           </div>
           <div className="field" style={{ flex: '1 1 140px' }}>
             <label className="lbl">最大 Token（单次回复上限）</label>
-            <input className="input" type="number" min={256} max={32768} step={256} value={cfg.maxTokens} onChange={(e) => patch({ maxTokens: Number(e.target.value) })} />
-            <div className="small faint mt8">{maxTokenHint(cfg.maxTokens)}</div>
+            <input className="input" type="number" min={256} max={cap.cap} step={256} value={cap.automatic?cap.value:cfg.maxTokens} onChange={(e) => patch({ outputMode: 'manual', maxTokens: Number(e.target.value) })} />
+            <div className="small faint mt8">{maxTokenHint(cap.value)}</div>
+            <div className="small mt8">实际发送：{cap.value.toLocaleString()} · {cap.automatic?'自动额度':'手动额度'} · {cap.source}</div>
+            <button className="btn sm" onClick={()=>patch({outputMode:'auto'})}>按模型与思考模式自动设置</button>
             {cap.capped && (
               <div className="small mt8" style={{ color: 'var(--warn, #fb923c)' }}>
-                该模型自身输出上限是 {cap.value}，实际请求会按 {cap.value} 发送（填再大也会被厂商拒绝）。
+                当前有效输出上限是 {cap.cap}，实际请求按 {cap.value} 发送。
               </div>
             )}
           </div>
         </div>
         <div className="row mt8" style={{ gap: 6, flexWrap: 'wrap' }}>
           <span className="small faint">快捷：</span>
-          {[2048, 4096, 8192, 16384].map((n) => (
-            <button key={n} className={`btn sm ${cfg.maxTokens === n ? '' : 'ghost'}`} onClick={() => patch({ maxTokens: n })}>{n}</button>
+          {[8192, 16384, 32768, 65536, 131072].filter(n=>n<=cap.cap).map((n) => (
+            <button key={n} className={`btn sm ${cfg.maxTokens === n ? '' : 'ghost'}`} onClick={() => patch({ outputMode:'manual',maxTokens: n })}>{n}</button>
           ))}
         </div>
 
         <div className="field mt8">
           <label className="lbl">上下文窗口（输入与输出总容量）</label>
+          <button className="btn sm" onClick={()=>patch({contextMode:'auto'})}>按模型自动识别</button>
           <input className="input" type="number" min={8192} max={2097152} step={1024}
-            value={cfg.contextWindow || 65536} onChange={(e) => patch({ contextWindow: Math.max(8192, Number(e.target.value) || 65536) })} />
-          <div className="small faint mt8">按模型实际容量填写，默认 65536。优先保留本次任务和工具结果，超出预算时明确提示。</div>
+            value={resolveCapacity(cfg, effective.model).tokens} onChange={(e) => patch({ contextMode: 'manual', contextWindow: Math.max(8192, Number(e.target.value) || 65536) })} />
+          <div className="small faint mt8">容量来源：{resolveCapacity(cfg,effective.model).source}。输入与输出共享容量。</div>
         </div>
 
         {modelOverride && <div className="small mt8">当前会话指定模型：{effective.model} <button className="btn sm ghost" onClick={onClearModelOverride}>改为跟随项目配置</button></div>}

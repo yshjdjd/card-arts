@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AppProvider, AssetsProvider, ProjectProvider, useApp, useRoute, useProject } from './state/store';
 import { ToastProvider } from './components/ui';
 import Dashboard from './pages/Dashboard';
@@ -29,7 +29,7 @@ const NAV = [
   { key: 'settings', label: '设置', icon: '⚙️' },
 ];
 
-function Sidebar({ projectId, tab }: { projectId: string; tab: string }) {
+function Sidebar({ projectId, tab, onOpenAgent }: { projectId: string; tab: string; onOpenAgent: () => void }) {
   const { project } = useProject();
   return (
     <aside className="sidebar">
@@ -54,6 +54,10 @@ function Sidebar({ projectId, tab }: { projectId: string; tab: string }) {
             <span>{n.label}</span>
           </a>
         ))}
+        <button className="nav" style={{ width: 'auto', background: 'transparent', border: 0 }} onClick={onOpenAgent}>
+          <span className="ico">🤖</span>
+          <span>Agent辅助</span>
+        </button>
       </div>
       <div className="foot">
         <div>本地优先 · 数据存在你的浏览器</div>
@@ -122,6 +126,46 @@ function ProjectBody({ projectId, tab }: { projectId: string; tab: string }) {
   }
 }
 
+/** 右下角悬浮按钮：默认固定右下角，按住可拖到屏幕大部分区域任意位置；轻点切换开合。 */
+function DraggableFab({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const drag = useRef<{ active: boolean; dx: number; dy: number; moved: boolean }>({
+    active: false, dx: 0, dy: 0, moved: false,
+  });
+
+  const onPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    drag.current = { active: true, dx: e.clientX - rect.left, dy: e.clientY - rect.top, moved: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!drag.current.active) return;
+    const nx = Math.min(Math.max(8, e.clientX - drag.current.dx), window.innerWidth - 54);
+    const ny = Math.min(Math.max(8, e.clientY - drag.current.dy), window.innerHeight - 54);
+    if (nx !== (pos?.x ?? -1) || ny !== (pos?.y ?? -1)) drag.current.moved = true;
+    setPos({ x: nx, y: ny });
+  };
+  const onPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    const wasMoved = drag.current.moved;
+    drag.current.active = false;
+    if (!wasMoved) onToggle();
+  };
+
+  return (
+    <button
+      className="chat-fab"
+      style={pos ? { left: pos.x, top: pos.y, right: 'auto', bottom: 'auto' } : undefined}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      title="AI 助手 (Ctrl+K) · 按住拖动"
+    >
+      {open ? '✕' : '🤖'}
+    </button>
+  );
+}
+
 function Shell() {
   const route = useRoute();
   const [chatOpen, setChatOpen] = useState(false);
@@ -153,7 +197,7 @@ function Shell() {
       <ProjectProvider projectId={route.projectId}>
         <AssetsProvider projectId={route.projectId}>
           <div className="app">
-            <Sidebar projectId={route.projectId} tab={tab} />
+            <Sidebar projectId={route.projectId} tab={tab} onOpenAgent={() => setChatOpen(true)} />
             <div className="main">
               <TopBar />
               <div className={`content ${tab === 'editor' ? 'flush' : ''}`}>
@@ -161,9 +205,7 @@ function Shell() {
               </div>
             </div>
           </div>
-          <button className="chat-fab" onClick={() => setChatOpen((v) => !v)} title="AI 助手 (Ctrl+K)">
-            {chatOpen ? '✕' : '🤖'}
-          </button>
+          <DraggableFab open={chatOpen} onToggle={() => setChatOpen((v) => !v)} />
           {chatOpen && <AgentChat onClose={() => setChatOpen(false)} />}
         </AssetsProvider>
       </ProjectProvider>
