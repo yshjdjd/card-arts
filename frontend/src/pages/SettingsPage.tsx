@@ -1,3 +1,4 @@
+import LocalFilesPanel from '../features/LocalFilesPanel';
 import React, { useState } from 'react';
 import { useProject, useApp, navigate } from '../state/store';
 import { useToast, useConfirm, Modal, Select, Field as F } from '../components/ui';
@@ -104,7 +105,7 @@ export default function SettingsPage() {
       <div className="card mt16">
         <div className="hd">本地文件夹</div>
         <div className="bd">
-          <WorkspaceCard dense />
+          <LocalFilesPanel/><WorkspaceCard dense />
           <div className="small faint mt8">
             服务端数据库与素材对象存储位于 <span className="mono">card_arts/data/</span>，
             可用环境变量 <span className="mono">CARDARTS_DATA_DIR</span> 改到别处。

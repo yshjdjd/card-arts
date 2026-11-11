@@ -1,3 +1,5 @@
+import { resolveDesignLayout } from './designSystem';
+import {layoutVertical} from './verticalText';
 /**
  * 卡牌渲染核心。纯 Canvas 2D 实现，主线程与 Web Worker 共用同一套代码，
  * 因此导出 / 打印 / 编辑器预览在任何地方都能得到完全一致的画面。
@@ -9,6 +11,7 @@ import { cropRect } from './editorGeometry';
 export type ImageLike = HTMLImageElement | ImageBitmap | HTMLCanvasElement;
 
 export interface RenderContext {
+  pixelDpiX?:number; pixelDpiY?:number;
   /** 字段值 -> 文本 */
   values: Record<string, unknown>;
   /** assetId -> 已解码图片 */
@@ -232,7 +235,7 @@ function drawImagePlaceholder(
   ctx.fillStyle = el.fill && el.fill !== 'transparent' ? el.fill : '#eef1f6';
   ctx.beginPath();
   if (el.borderRadius) roundRect(ctx, x, y, w, h, el.borderRadius * s);
-  else ctx.rect(x, y, w, h);
+  else {ctx.beginPath();ctx.rect(x, y, w, h);}
   ctx.fill();
   ctx.globalAlpha = 1;
 
@@ -242,7 +245,7 @@ function drawImagePlaceholder(
   ctx.setLineDash([6 * s, 5 * s]);
   ctx.beginPath();
   if (el.borderRadius) roundRect(ctx, x, y, w, h, el.borderRadius * s);
-  else ctx.rect(x, y, w, h);
+  else {ctx.beginPath();ctx.rect(x, y, w, h);}
   ctx.stroke();
   ctx.setLineDash([]);
 
@@ -282,6 +285,28 @@ function drawElement(
 
   ctx.save();
   ctx.globalAlpha = 1;
+  if(el.blendMode)ctx.globalCompositeOperation=el.blendMode;
+  if(el.shadow){ctx.shadowColor=el.shadow.color;ctx.shadowBlur=el.shadow.blur*s;ctx.shadowOffsetX=el.shadow.x*s;ctx.shadowOffsetY=el.shadow.y*s;}
+  const paintFill=()=>{
+    if(el.textureAssetId){
+      const image=rc.images[el.textureAssetId];
+      if(image&&typeof DOMMatrix!=='undefined'){
+        const pattern=ctx.createPattern(image as CanvasImageSource,'repeat');
+        if(pattern){
+          const iw=Number(image.width)||1,ih=Number(image.height)||1;
+          const [ox,oy,pw,ph]=el.shapePath?(el.pathViewBox??[0,0,100,100]):[x,y,w,h];
+          const cover=Math.max(pw/iw,ph/ih),factor=Math.max(.01,el.textureScale??1);
+          const sx=el.textureMode==='repeat'?factor*(el.shapePath?pw/w:1)*s:cover*factor;
+          const sy=el.textureMode==='repeat'?factor*(el.shapePath?ph/h:1)*s:cover*factor;
+          pattern.setTransform(new DOMMatrix([sx,0,0,sy,ox+(pw-iw*sx)/2,oy+(ph-ih*sy)/2]));
+          return pattern;
+        }
+      }
+      if(!image)rc.diagnostics?.push({elementId:el.id,message:'缺少纹理素材'});
+    }
+    if(el.gradient){const a=el.gradient.angle*Math.PI/180,dx=Math.cos(a)*w/2,dy=Math.sin(a)*h/2;const g=ctx.createLinearGradient(x+w/2-dx,y+h/2-dy,x+w/2+dx,y+h/2+dy);g.addColorStop(0,el.gradient.from);g.addColorStop(1,el.gradient.to);return g;}
+    return el.fill;
+  };
 
   // 旋转围绕元素中心
   if (el.rotation) {
@@ -292,11 +317,24 @@ function drawElement(
 
   switch (el.kind) {
     case 'rectangle':
+    case 'path':
     case 'ellipse': {
       const bw = (el.borderWidth ?? 0) * s;
-      if (el.fill && el.fill !== 'transparent' && (el.fillOpacity ?? 1) > 0) {
+      if(el.kind==='path'&&!el.shapePath)break;
+      if(el.shapePath && typeof Path2D !== 'undefined') {
+        let path:Path2D;
+        try{path=new Path2D(el.shapePath);}catch{rc.diagnostics?.push({elementId:el.id,message:'矢量路径无效'});break;}
+        const shapeFill=paintFill();
+        const [vx,vy,vw,vh]=el.pathViewBox??[0,0,100,100];
+        if(vw<=0||vh<=0)break;
+        ctx.translate(x,y);ctx.scale(w/vw,h/vh);ctx.translate(-vx,-vy);
+        if(el.textureAssetId||(el.fill && el.fill!=='transparent')){ctx.globalAlpha=el.fillOpacity??1;ctx.fillStyle=shapeFill;ctx.fill(path);}
+        if(bw>0 && el.borderColor){ctx.globalAlpha=el.borderOpacity??1;ctx.strokeStyle=el.borderColor;ctx.lineWidth=bw/Math.min(w/vw,h/vh);setDash(ctx,el.borderStyle,ctx.lineWidth);ctx.stroke(path);ctx.setLineDash([]);}
+        break;
+      }
+      if ((el.textureAssetId || (el.fill && el.fill !== 'transparent')) && (el.fillOpacity ?? 1) > 0) {
         ctx.globalAlpha = el.fillOpacity ?? 1;
-        ctx.fillStyle = el.fill;
+        ctx.fillStyle = paintFill();
         if (el.kind === 'ellipse') {
           ctx.beginPath();
           ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
@@ -318,7 +356,7 @@ function drawElement(
           ctx.stroke();
         } else {
           if (el.borderRadius) roundRect(ctx, x + bw / 2, y + bw / 2, w - bw, h - bw, el.borderRadius * s);
-          else ctx.rect(x + bw / 2, y + bw / 2, w - bw, h - bw);
+          else {ctx.beginPath();ctx.rect(x + bw / 2, y + bw / 2, w - bw, h - bw);}
           ctx.stroke();
         }
         ctx.setLineDash([]);
@@ -348,7 +386,10 @@ function drawElement(
         break;
       }
       ctx.save();
-      if (el.borderRadius) {
+      if(el.maskPath&&typeof Path2D!=='undefined'){
+        try{const path=new Path2D(el.maskPath);ctx.translate(x,y);ctx.scale(w/100,h/100);ctx.clip(path);ctx.scale(100/w,100/h);ctx.translate(-x,-y);}catch{rc.diagnostics?.push({elementId:el.id,message:'自定义蒙版路径无效'});}
+      } else if(el.imageMask==='ellipse'){ctx.beginPath();ctx.ellipse(x+w/2,y+h/2,w/2,h/2,0,0,Math.PI*2);ctx.clip();}
+      else if (el.borderRadius) {
         roundRect(ctx, x, y, w, h, el.borderRadius * s);
         ctx.clip();
       } else {
@@ -360,6 +401,8 @@ function drawElement(
       const ih = 'height' in img ? img.height : 0;
       const crop = cropRect(iw, ih, { x, y, width: w, height: h }, el.imageFit ?? 'cover', el.imageZoom, el.imageFocusX, el.imageFocusY);
       const { x: dx, y: dy, width: dw, height: dh } = crop;
+      const dpi=Math.min(iw/Math.max(1,dw/s)*(rc.pixelDpiX??300),ih/Math.max(1,dh/s)*(rc.pixelDpiY??300));
+      if(dpi<150)rc.diagnostics?.push({elementId:el.id,message:`图片有效分辨率约 ${Math.round(dpi)} DPI，建议至少 150 DPI`});
       ctx.globalAlpha = el.fillOpacity ?? 1;
       ctx.drawImage(img as CanvasImageSource, dx, dy, dw, dh);
       ctx.restore();
@@ -408,17 +451,31 @@ function drawElement(
       const raw = el.fieldId ? String(rc.values?.[el.fieldId] ?? '') : (el.text ?? '');
       const content = interpolate(raw, rc.values ?? {});
       if (!content) break;
+      if(el.writingMode&&el.writingMode!=='horizontal'){
+        const vertical=layoutVertical(content,el,s);
+        if(vertical.overflow)rc.diagnostics?.push({elementId:el.id,message:'竖排文字超出文本框'});
+        ctx.textBaseline='top';ctx.textAlign='left';ctx.globalAlpha=el.textOpacity??1;
+        for(const g of vertical.glyphs){const gx=x+g.x,gy=y+g.y;
+          if(g.kind!=='text'){const image=g.kind==='icon'?rc.icons[g.key!]:rc.images[g.key!];if(image)ctx.drawImage(image as CanvasImageSource,gx,gy,g.size,g.size);continue;}
+          ctx.font=g.font;ctx.fillStyle=g.color||el.color||'#000';
+          if(el.borderWidth&&el.borderColor){ctx.strokeStyle=el.borderColor;ctx.lineWidth=el.borderWidth*s;ctx.lineJoin='round';ctx.strokeText(g.text,gx,gy);}
+          ctx.fillText(g.text,gx,gy);
+        }break;
+      }
 
       const text = layoutText(ctx, content, el, s);
       if (text.overflow) rc.diagnostics?.push({ elementId: el.id, message: el.autoFit ? '已缩至最小字号仍溢出' : '文字超出文本框' });
-      let top = y + (el.verticalAlign === 'middle' ? (h - text.height) / 2 : el.verticalAlign === 'bottom' ? h - text.height : 0);
+      const padding=(el.padding??0)*s, innerW=Math.max(1,w-padding*2),innerH=Math.max(1,h-padding*2);
+      let top = y+padding + (el.verticalAlign === 'middle' ? (innerH - text.height) / 2 : el.verticalAlign === 'bottom' ? innerH - text.height : 0);
+      if(el.autoFit&&text.size/s<(el.fontSize??24)*.75)rc.diagnostics?.push({elementId:el.id,message:'文字自动缩小超过 25%，建议调整版式'});
+      if(text.size/s/(rc.pixelDpiY??300)*72<6)rc.diagnostics?.push({elementId:el.id,message:'字号低于 6pt，请按实际印刷尺寸检查可读性'});
       ctx.textBaseline = 'top'; ctx.globalAlpha = el.textOpacity ?? 1;
       for (const line of text.lines) {
-        const left = x + (el.horizontalAlign === 'center' ? (w - line.width) / 2 : el.horizontalAlign === 'right' ? w - line.width : 0);
+        const left = x+padding + (el.horizontalAlign === 'center' ? (innerW - line.width) / 2 : el.horizontalAlign === 'right' ? innerW - line.width : 0);
         for (const run of line.runs) {
           ctx.font = run.font;
-          ctx.fillStyle = run.color || el.color || '#000';
-          const rx = left + run.x, ry = top + (line.height - run.size) / 2;
+          ctx.fillStyle = el.gradient?paintFill():(run.color || el.color || '#000');
+          const rx = left + run.x, ry = top + (line.height - run.size) / 2+(run.kind==='text'?0:(el.inlineIconOffset??0)*s);
           if (run.kind !== 'text') {
             const image = run.kind === 'icon' ? rc.icons[run.key!] : rc.images[run.key!];
             if (image) ctx.drawImage(image as CanvasImageSource, rx, ry, run.size, run.size);
@@ -432,7 +489,7 @@ function drawElement(
             else paint(run.text, rx);
           }
         }
-        top += line.height;
+        top += line.height+(line.gapAfter??0);
       }
       break;
     }
@@ -452,16 +509,21 @@ function drawElement(
 }
 
 /** 数量展开：把「费用=3」渲染成 3 个重复图标 */
-function expandCount(el: LayoutElement, values: Record<string, unknown>): LayoutElement[] {
+export function expandCount(el: LayoutElement, values: Record<string, unknown>): Array<LayoutElement & {slotFraction?:number}> {
   if (!el.countFieldId) return [el];
-  const n = Math.min(el.countMax ?? 20, Math.max(0, Math.round(Number(values?.[el.countFieldId] ?? 0))));
-  if (n <= 1) return n === 1 ? [el] : [];
+  const raw=Number(values?.[el.countFieldId]??0),limit=Math.max(1,Math.min(100,Math.floor(el.countMax??20)));
+  const amount=Math.min(limit,Math.max(0,Number.isFinite(raw)?raw:0));
+  const filled=el.countHalf?Math.round(amount*2)/2:Math.round(amount);
+  const dynamic=el.countSlotsFieldId?Number(values[el.countSlotsFieldId]):undefined;
+  const slots=dynamic===undefined?el.countSlots:Number.isFinite(dynamic)?Math.max(0,Math.floor(dynamic)):0;
+  const n=slots!==undefined?Math.max(0,Math.min(limit,Math.floor(slots))):Math.ceil(filled);
   const gap = el.countSpacing ?? 0;
   const dir = el.countDirection ?? 'horizontal';
-  const out: LayoutElement[] = [];
+  const out: Array<LayoutElement & {slotFraction?:number}> = [];
   for (let i = 0; i < n; i++) {
     out.push({
       ...el,
+      slotFraction:Math.max(0,Math.min(1,filled-i)),
       x: dir === 'horizontal' ? el.x + (el.width + gap) * i : el.x,
       y: dir === 'vertical' ? el.y + (el.height + gap) * i : el.y,
     });
@@ -470,8 +532,14 @@ function expandCount(el: LayoutElement, values: Record<string, unknown>): Layout
 }
 
 export interface RenderOptions extends RenderContext {
+  /** 编辑器暂存区；导出不传此参数。 */
+  workspacePadding?: number;
   /** 打印 / 导出时把整张牌外扩的出血（px，已按 scale 换算前） */
   bleed?: number;
+}
+
+export function resolveCardDesign(ctx: Pick<CanvasRenderingContext2D,'font'|'measureText'>,layout:Layout,values:Record<string,unknown>={}):Layout {
+  return resolveDesignLayout(layout,el=>layoutText(ctx,interpolate(el.fieldId?String(values[el.fieldId]??''):el.text??'',values),{...el,autoFit:false,height:100000},1).height+2*(el.padding??0));
 }
 
 export function renderLayout(
@@ -483,12 +551,15 @@ export function renderLayout(
 ): void {
   const s = opts.scale;
   const values = card?.values ?? opts.values ?? {};
+  layout=resolveCardDesign(ctx,layout,values);
   const bleed = (opts.bleed ?? 0) * s;
   const W = layout.width * s + bleed * 2;
   const H = layout.height * s + bleed * 2;
 
   ctx.save();
   ctx.clearRect(0, 0, W, H);
+  const workspace=(opts.workspacePadding??0)*s;
+  if(workspace){ctx.clearRect(0,0,W+workspace*2,H+workspace*2);ctx.translate(workspace,workspace);}
 
   // 背景
   ctx.fillStyle = layout.backgroundColor || '#ffffff';
@@ -510,12 +581,13 @@ export function renderLayout(
   }
 
   // 圆角裁切
-  if (layout.borderRadius) {
+  if (layout.borderRadius && !workspace) {
     roundRect(ctx, 0, 0, layout.width * s, layout.height * s, layout.borderRadius * s);
     ctx.clip();
   }
 
   for (const source of layout.elements) {
+    if(layout.elements.some(e=>e.clipSourceId===source.id))continue;
     const el = { ...source, ...(card?.layoutOverrides?.[source.id] || {}), id: source.id, kind: source.kind };
     if (el.kind === 'image' && el.fieldId) el.assetId = String(values[el.fieldId] || el.assetId || '');
     if (el.kind === 'icon' && el.fieldId) {
@@ -525,7 +597,26 @@ export function renderLayout(
     if (!el.hidden && (el.x < 0 || el.y < 0 || el.x + el.width > layout.width || el.y + el.height > layout.height)) opts.diagnostics?.push({ elementId: el.id, message: '元素超出裁切边界' });
     if (!evaluate(el.displayCondition, values)) continue;
     for (const inst of expandCount(el, values)) {
-      drawElement(ctx, inst, { ...opts, values }, fields);
+      const mask=el.clipSourceId?layout.elements.find(e=>e.id===el.clipSourceId):undefined;
+      if(el.clipSourceId&&!mask){opts.diagnostics?.push({elementId:el.id,message:'缺少剪切源'});continue;}
+      ctx.save();
+      if(mask){
+        if(mask.width<=0||mask.height<=0){ctx.restore();continue;}
+        const mx=mask.x*s,my=mask.y*s,mw=mask.width*s,mh=mask.height*s,a=mask.rotation*Math.PI/180;
+        ctx.translate(mx+mw/2,my+mh/2);ctx.rotate(a);ctx.translate(-mw/2,-mh/2);
+        if(mask.shapePath){
+          const [vx,vy,vw,vh]=mask.pathViewBox??[0,0,100,100];
+          if(vw<=0||vh<=0){ctx.restore();continue;}
+          try{const path=new Path2D(mask.shapePath);ctx.scale(mw/vw,mh/vh);ctx.translate(-vx,-vy);ctx.clip(path);ctx.translate(vx,vy);ctx.scale(vw/mw,vh/mh);}catch{ctx.restore();opts.diagnostics?.push({elementId:mask.id,message:'剪切路径无效'});continue;}
+        }else{ctx.beginPath();if(mask.kind==='ellipse')ctx.ellipse(mw/2,mh/2,mw/2,mh/2,0,0,Math.PI*2);else if(mask.borderRadius)roundRect(ctx,0,0,mw,mh,mask.borderRadius*s);else ctx.rect(0,0,mw,mh);ctx.clip();}
+        ctx.translate(mw/2,mh/2);ctx.rotate(-a);ctx.translate(-mx-mw/2,-my-mh/2);
+      }
+      const draw=()=>drawElement(ctx, inst, { ...opts, values, pixelDpiX:layout.width/(layout.widthMm??63.5)*25.4,pixelDpiY:layout.height/(layout.heightMm??88.9)*25.4 }, fields);
+      if(inst.slotFraction!==undefined&&inst.slotFraction<1){
+        ctx.save();ctx.filter=`grayscale(1) opacity(${Math.max(0,Math.min(1,el.countEmptyOpacity??.2))})`;draw();ctx.restore();
+        if(inst.slotFraction>0){ctx.save();const cx=(inst.x+inst.width/2)*s,cy=(inst.y+inst.height/2)*s,a=inst.rotation*Math.PI/180;ctx.translate(cx,cy);ctx.rotate(a);ctx.beginPath();ctx.rect(-inst.width*s/2,-inst.height*s/2,inst.width*s*inst.slotFraction,inst.height*s);ctx.clip();ctx.rotate(-a);ctx.translate(-cx,-cy);draw();ctx.restore();}
+      }else draw();
+      ctx.restore();
     }
   }
 
@@ -535,7 +626,7 @@ export function renderLayout(
     ctx.strokeStyle = layout.borderColor;
     ctx.lineWidth = layout.borderWidth * 2 * s; // 内描边，视觉宽度 ×2
     if (layout.borderRadius) roundRect(ctx, 0, 0, layout.width * s, layout.height * s, layout.borderRadius * s);
-    else ctx.rect(0, 0, layout.width * s, layout.height * s);
+    else {ctx.beginPath();ctx.rect(0, 0, layout.width * s, layout.height * s);}
     ctx.stroke();
   }
 
@@ -548,8 +639,9 @@ export function renderToCanvas(
 ): HTMLCanvasElement {
   const bleed = (opts.bleed ?? 0) * opts.scale;
   const cv = document.createElement('canvas');
-  cv.width = Math.max(1, Math.round(layout.width * opts.scale + bleed * 2));
-  cv.height = Math.max(1, Math.round(layout.height * opts.scale + bleed * 2));
+  const padding=(opts.workspacePadding??0)*opts.scale;
+  cv.width = Math.max(1, Math.round(layout.width * opts.scale + bleed * 2 + padding*2));
+  cv.height = Math.max(1, Math.round(layout.height * opts.scale + bleed * 2 + padding*2));
   const ctx = cv.getContext('2d');
   if (ctx) renderLayout(ctx, layout, card, opts, fields);
   return cv;

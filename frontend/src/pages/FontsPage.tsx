@@ -1,3 +1,4 @@
+import { markOverrides } from '../lib/designSystem';
 import React, { useEffect, useRef, useState } from 'react';
 import { useAssets, useProject } from '../state/store';
 import { useToast } from '../components/ui';
@@ -52,7 +53,7 @@ export default function FontsPage() {
   const applyAll = async () => {
     await update((c) => {
       for (const deck of c.decks) for (const layout of [deck.frontLayout, deck.backLayout]) {
-        for (const el of layout?.elements || []) if (el.kind === 'text') el.fontFamily = key;
+        for (const el of layout?.elements || []) if (el.kind === 'text') {markOverrides(el,{fontFamily:key});el.fontFamily = key;}
       }
     }, '统一项目字体');
     toast('已应用到全部牌组正反面的文字；可撤销', 'ok');

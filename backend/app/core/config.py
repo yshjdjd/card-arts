@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -9,6 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]  # backend/
 ROOT_DIR = BASE_DIR.parent                      # card_arts/  —— 整个项目的工作目录根
+if getattr(sys,'frozen',False):
+    ROOT_DIR=Path(sys._MEIPASS)
+    BASE_DIR=ROOT_DIR/'backend'
 
 
 def _data_root() -> Path:
@@ -20,6 +24,9 @@ def _data_root() -> Path:
     env = os.environ.get("CARDARTS_DATA_DIR")
     if env:
         return Path(env).expanduser().resolve()
+    if os.getenv('CARDARTS_DESKTOP')=='1':
+        if os.name=='nt':return Path(os.getenv('LOCALAPPDATA',str(Path.home()/'AppData/Local')))/'CardArts'/'data'
+        return Path(os.getenv('XDG_DATA_HOME',str(Path.home()/'.local/share')))/'CardArts'/'data'
     return ROOT_DIR / "data"
 
 
@@ -64,8 +71,8 @@ class Settings(BaseSettings):
 
     # ---- 内置图标库（game-icons.net, CC BY 3.0）----
     # 目录结构：{ICON_DIR}/{author}/{name}.svg
-    ICON_DIR: Path = DATA_DIR / "game-icons"
-    ICON_CATALOG: Path = DATA_DIR / "game-icons" / "catalog.json"
+    ICON_DIR: Path = (ROOT_DIR / "data" if os.getenv("CARDARTS_DESKTOP")=="1" else DATA_DIR) / "game-icons"
+    ICON_CATALOG: Path = ICON_DIR / "catalog.json"
     # 浏览器访问前缀（main.py 里做静态挂载）
     ICON_URL_PREFIX: str = "/game-icons"
     ICON_DEFAULT_PAGE_SIZE: int = 60

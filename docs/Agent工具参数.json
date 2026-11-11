@@ -1,0 +1,2571 @@
+{
+  "source": "frontend/src/lib/agentProtocol.ts",
+  "tools": [
+    {
+      "name": "files.roots",
+      "wireName": "files_roots",
+      "level": "read",
+      "description": "files.roots {} → 列出用户已授权的本机目录ID。仅本机桌面模式可用；不能授予目录权限。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "files.execute",
+      "wireName": "files_execute",
+      "level": "write",
+      "description": "files.execute {grant,path?,operation:list/read/write/mkdir/copy/move/import,target?,text?} → 在授权目录内操作相对路径。write只创建新UTF-8文件，禁止覆盖；copy/move只支持单文件且目标不能存在；import将图片/字体导入当前项目素材库。路径分隔符用/；不支持删除、执行程序或绝对路径。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "grant": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "list",
+              "read",
+              "write",
+              "mkdir",
+              "copy",
+              "move",
+              "import"
+            ]
+          },
+          "target": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "grant",
+          "operation"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "tools.discover",
+      "wireName": "tools_discover",
+      "level": "read",
+      "description": "tools.discover {query?,names?[]} → 按分类关键词或精确工具名检索并加载工具，下一轮获得参数。分类 project/deck/field/card/element/layout/layer/design/template/doc/asset/font/web/conversation/files；每次最多8项。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "project.overview",
+      "wireName": "project_overview",
+      "level": "read",
+      "description": "project.overview {} → 读取项目全貌（牌组/字段/卡牌/版式/文档/设置的真实 id）",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "project.rename",
+      "wireName": "project_rename",
+      "level": "write",
+      "description": "project.rename {name} → 改项目名",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "project.setExport",
+      "wireName": "project_setExport",
+      "level": "write",
+      "description": "project.setExport {dpi?,bleedMm?,duplex?,flipOnBack?,cutLines?,pageSize?} → 改导出/打印设置",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "dpi": {
+            "type": "number"
+          },
+          "bleedMm": {
+            "type": "number"
+          },
+          "duplex": {
+            "type": "boolean"
+          },
+          "flipOnBack": {
+            "type": "boolean"
+          },
+          "cutLines": {
+            "type": "boolean"
+          },
+          "pageSize": {
+            "type": "string",
+            "enum": [
+              "A4",
+              "Letter"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "project.setSetting",
+      "wireName": "project_setSetting",
+      "level": "write",
+      "description": "project.setSetting {key,value} → 改任意项目设置（如 lang、syncEnabled）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {}
+        },
+        "required": [
+          "key"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "deck.list",
+      "wireName": "deck_list",
+      "level": "read",
+      "description": "deck.list {} → 列出所有牌组",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "deck.create",
+      "wireName": "deck_create",
+      "level": "write",
+      "description": "deck.create {name,preset?,width?,height?,layout?} → 新建牌组；preset 可选 poker/bridge/tarot/mini/euro/square",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string",
+            "enum": [
+              "poker",
+              "bridge",
+              "tarot",
+              "mini",
+              "euro",
+              "square"
+            ]
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          },
+          "layout": {}
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "deck.rename",
+      "wireName": "deck_rename",
+      "level": "write",
+      "description": "deck.rename {deck,name} → 牌组改名",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deck",
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "deck.delete",
+      "wireName": "deck_delete",
+      "level": "destructive",
+      "description": "deck.delete {deck} → 删除牌组",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          }
+        },
+        "required": [
+          "deck"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "deck.duplicate",
+      "wireName": "deck_duplicate",
+      "level": "write",
+      "description": "deck.duplicate {deck,name?} → 复制牌组",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deck"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "deck.setSize",
+      "wireName": "deck_setSize",
+      "level": "write",
+      "description": "deck.setSize {deck,preset|width/height} → 改牌组卡牌尺寸",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "preset": {
+            "type": "string",
+            "enum": [
+              "poker",
+              "bridge",
+              "tarot",
+              "mini",
+              "euro",
+              "square"
+            ]
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "deck"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "deck.setSharedBack",
+      "wireName": "deck_setSharedBack",
+      "level": "write",
+      "description": "deck.setSharedBack {deck,value} → 是否共用牌背",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "value": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deck",
+          "value"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "field.list",
+      "wireName": "field_list",
+      "level": "read",
+      "description": "field.list {deck} → 列出字段（含 id）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          }
+        },
+        "required": [
+          "deck"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "field.add",
+      "wireName": "field_add",
+      "level": "write",
+      "description": "field.add {deck,name,type?,options?,showInTable?,default?} → 新增字段；type 可选 text/number/image/select/color/boolean",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "number",
+              "image",
+              "select",
+              "color",
+              "boolean"
+            ]
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "showInTable": {
+            "type": "boolean"
+          },
+          "default": {}
+        },
+        "required": [
+          "deck",
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "field.rename",
+      "wireName": "field_rename",
+      "level": "write",
+      "description": "field.rename {deck,field,name} → 字段改名",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "field": {
+            "type": "string",
+            "description": "字段定位：id、名称、名称子串或序号（1 起）"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deck",
+          "field",
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "field.setType",
+      "wireName": "field_setType",
+      "level": "write",
+      "description": "field.setType {deck,field,type,options?} → 改字段类型",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "field": {
+            "type": "string",
+            "description": "字段定位：id、名称、名称子串或序号（1 起）"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "number",
+              "image",
+              "select",
+              "color",
+              "boolean"
+            ]
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "deck",
+          "field",
+          "type"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "field.setOptions",
+      "wireName": "field_setOptions",
+      "level": "write",
+      "description": "field.setOptions {deck,field,options[]} → 改下拉选项",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "field": {
+            "type": "string",
+            "description": "字段定位：id、名称、名称子串或序号（1 起）"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "deck",
+          "field",
+          "options"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "field.delete",
+      "wireName": "field_delete",
+      "level": "destructive",
+      "description": "field.delete {deck,field} → 删除字段（同时清掉卡牌上的值）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "field": {
+            "type": "string",
+            "description": "字段定位：id、名称、名称子串或序号（1 起）"
+          }
+        },
+        "required": [
+          "deck",
+          "field"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.list",
+      "wireName": "card_list",
+      "level": "read",
+      "description": "card.list {deck,limit?,offset?} → 列出卡牌（默认 30 条）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "deck"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.find",
+      "wireName": "card_find",
+      "level": "read",
+      "description": "card.find {deck,query} → 按任意字段值搜索卡牌",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deck",
+          "query"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.add",
+      "wireName": "card_add",
+      "level": "write",
+      "description": "card.add {deck,name?,values?} → 新增一条卡牌，values 用字段名或字段 id 作 key",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "name": {
+            "type": "string"
+          },
+          "values": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "deck"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.addMany",
+      "wireName": "card_addMany",
+      "level": "write",
+      "description": "card.addMany {deck,items:[{name,...values}]} → 批量新增",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "deck",
+          "items"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.update",
+      "wireName": "card_update",
+      "level": "write",
+      "description": "card.update {deck,card,values:{字段:值}} → 改一条卡牌",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "card": {
+            "type": "string",
+            "description": "卡牌定位：id、名称、名称子串或序号（1 起）"
+          },
+          "values": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "deck",
+          "card",
+          "values"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.set",
+      "wireName": "card_set",
+      "level": "write",
+      "description": "card.set {deck,card,field,value} → 改一条卡牌的单个字段",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "card": {
+            "type": "string",
+            "description": "卡牌定位：id、名称、名称子串或序号（1 起）"
+          },
+          "field": {
+            "type": "string",
+            "description": "字段定位：id、名称、名称子串或序号（1 起）"
+          },
+          "value": {}
+        },
+        "required": [
+          "deck",
+          "card",
+          "field"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.batchSet",
+      "wireName": "card_batchSet",
+      "level": "write",
+      "description": "card.batchSet {deck,field,value} → 整个牌组某字段统一赋值（如全部数量=2）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "field": {
+            "type": "string",
+            "description": "字段定位：id、名称、名称子串或序号（1 起）"
+          },
+          "value": {}
+        },
+        "required": [
+          "deck",
+          "field"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.batchFill",
+      "wireName": "card_batchFill",
+      "level": "write",
+      "description": "card.batchFill {deck,items:[{card,values}]} → 按卡逐条批量改",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "deck",
+          "items"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.delete",
+      "wireName": "card_delete",
+      "level": "destructive",
+      "description": "card.delete {deck,card} → 删除卡牌",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "card": {
+            "type": "string",
+            "description": "卡牌定位：id、名称、名称子串或序号（1 起）"
+          }
+        },
+        "required": [
+          "deck",
+          "card"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "card.duplicate",
+      "wireName": "card_duplicate",
+      "level": "write",
+      "description": "card.duplicate {deck,card,n?} → 复制卡牌",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "card": {
+            "type": "string",
+            "description": "卡牌定位：id、名称、名称子串或序号（1 起）"
+          },
+          "n": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "deck",
+          "card"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "design.catalog",
+      "wireName": "design_catalog",
+      "level": "read",
+      "description": "design.catalog {} → 查询项目共享样式、组件ID、修订版本、字段需求和自动布局",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "design.execute",
+      "wireName": "design_execute",
+      "level": "write",
+      "description": "design.execute {deck,side,operation,args:{...}} → 体力显示用element.update patch设置countFieldId为真实数字字段、countMax上限、countSlots固定总格数、countSlotsFieldId绑定总格数数字字段（优先，0不显示）、countHalf:true支持半格、countEmptyOpacity:0-1控制空格。精细设计。operation: material.apply(ids,material:gold/silver/bronze/parchment/jade/lacquer) 对形状应用材质，替换填充纹理描边阴影； clip.create(ids,source) 用真实矩形/椭圆/路径元素裁切所选图层，源不单独显示；clip.release(ids)解除；暂不支持嵌套。 skill.create(title,body,titleField?,bodyField?,x?,y?,width?,fontSize?) 创建带自适应底板的技能块； style.save(name,properties,style?更新)/style.apply(style,ids)/style.reset(style,ids)/style.detach(ids)；component.save(name,ids,component?更新并同步)/component.insert(component,x?,y?)/component.sync(component)/component.reset(component)/component.detach(ids)；layout.anchor(ids,horizontal:left/right/center/stretch,vertical:top/bottom/center/stretch)/layout.flow(ids,direction:horizontal/vertical,gap?,padding?,x?,y?,width?,align?)/layout.grow(ids,maxHeight,image?,minImageHeight?)/layout.clear(ids)/layout.guide(axis:x/y,value或clear:true)。element.precise(ids,x?,y?,width?,height?,unit:px/mm)支持四则算式精确排版；text.snippet.save(name,text)保存规则片段；text.snippet.insert(ids,snippet)插入静态文本。先查询真实ID。共享更新影响全项目；局部覆盖默认保留。component.reset会丢弃全部实例覆盖，需确认。文字方向用element.update patch设置writingMode:horizontal/vertical-rl/vertical-lr；竖排中英文均为直立字形，borderColor/borderWidth设文字描边。形状纹理用element.update patch设置textureAssetId（先asset.list取得真实图片ID）、textureMode:cover/repeat、textureScale:正数；纹理优先于渐变和纯色。效果用element.update patch设置padding/paragraphSpacing/firstLineIndent/inlineIconScale/inlineIconOffset/gradient:{from,to,angle}/shadow:{color,blur,x,y}/imageMask:ellipse或rectangle/maskPath:0-100坐标SVG路径/blendMode。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "material.apply",
+              "clip.create",
+              "clip.release",
+              "skill.create",
+              "style.save",
+              "style.apply",
+              "style.reset",
+              "style.detach",
+              "component.save",
+              "component.insert",
+              "component.sync",
+              "component.reset",
+              "component.detach",
+              "layout.anchor",
+              "layout.flow",
+              "layout.grow",
+              "layout.clear",
+              "layout.guide",
+              "element.precise",
+              "text.snippet.save",
+              "text.snippet.insert"
+            ]
+          },
+          "args": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "operation",
+          "args"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "design.preflight",
+      "wireName": "design_preflight",
+      "level": "read",
+      "description": "design.preflight {deck,side} → 渲染全牌组并检查溢出、小字号、缩字过多、低分辨率图片、低对比、缺失素材及样式/组件/字段引用，返回定位ID；不会修改工程",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          }
+        },
+        "required": [
+          "deck",
+          "side"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "template.list",
+      "wireName": "template_list",
+      "level": "read",
+      "description": "template.list {query?} → 查询内置与本项目保存的版式模板；返回真实 id、用途和字段需求",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "template.inspect",
+      "wireName": "template_inspect",
+      "level": "read",
+      "description": "template.inspect {template,deck?,theme?,preset?,side?,mapping?} → 只读预览版式、字段绑定和将新增的字段；theme:parchment/midnight/minimal；preset 用尺寸预设；side:front/back/both；mapping 为模板字段id到已有字段id",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string"
+          },
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "theme": {
+            "type": "string",
+            "enum": [
+              "parchment",
+              "midnight",
+              "minimal"
+            ]
+          },
+          "preset": {
+            "type": "string",
+            "enum": [
+              "poker",
+              "bridge",
+              "tarot",
+              "mini",
+              "euro",
+              "square"
+            ]
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back",
+              "both"
+            ]
+          },
+          "mapping": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "template"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "template.create",
+      "wireName": "template_create",
+      "level": "write",
+      "description": "template.create {template,name?,theme?,preset?,side?} → 按模板新建空牌组，不改现有牌组；先 list/inspect；使用真实模板id",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "theme": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string",
+            "enum": [
+              "poker",
+              "bridge",
+              "tarot",
+              "mini",
+              "euro",
+              "square"
+            ]
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back",
+              "both"
+            ]
+          }
+        },
+        "required": [
+          "template"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "template.apply",
+      "wireName": "template_apply",
+      "level": "destructive",
+      "description": "template.apply {template,deck,theme?,preset?,side?,mapping?} → 替换现有牌组指定面的版式，保留卡牌和字段，可撤销；先 inspect 核对字段映射并确认替换范围",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string"
+          },
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "theme": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string",
+            "enum": [
+              "poker",
+              "bridge",
+              "tarot",
+              "mini",
+              "euro",
+              "square"
+            ]
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back",
+              "both"
+            ]
+          },
+          "mapping": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "template",
+          "deck"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "template.save",
+      "wireName": "template_save",
+      "level": "write",
+      "description": "template.save {deck,name} → 将牌组正反面和字段保存为项目模板，供界面与Agent复用；素材引用依赖本项目",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deck",
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "layer.list",
+      "wireName": "layer_list",
+      "level": "read",
+      "description": "layer.list {deck,side} → 列出顶层到底层的真实图层 ID、序号、组、锁定和隐藏状态",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          }
+        },
+        "required": [
+          "deck",
+          "side"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "layer.manage",
+      "wireName": "layer_manage",
+      "level": "write",
+      "description": "layer.manage {deck,side,operation,ids,target?,name?,order?,expandGroups?} → 管理图层；operation: front/back/up/down/above/below/order/rename/renameGroup/show/hide/lock/unlock/group/ungroup；先 layer.list；ids 使用真实 ID；order 为完整底层到顶层 ID 数组；锁定层需先 unlock；默认操作整组，expandGroups:false 可单层操作；above/below 用 target ID",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back",
+              "up",
+              "down",
+              "above",
+              "below",
+              "order",
+              "rename",
+              "renameGroup",
+              "show",
+              "hide",
+              "lock",
+              "unlock",
+              "group",
+              "ungroup"
+            ]
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "target": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "order": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expandGroups": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "operation",
+          "ids"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.list",
+      "wireName": "element_list",
+      "level": "read",
+      "description": "element.list {deck,side} → 列出某面版式的元素（side: front|back）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          }
+        },
+        "required": [
+          "deck",
+          "side"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.add",
+      "wireName": "element_add",
+      "level": "write",
+      "description": "element.add {deck,side,kind,x,y,width,height,name?,fieldId?,text?,fill?,color?,fontSize?,fontFamily?,richText?} → 新增元素；kind 可选 text/image/icon/rectangle/ellipse/line/path",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image",
+              "icon",
+              "rectangle",
+              "ellipse",
+              "line",
+              "path"
+            ]
+          },
+          "shape": {
+            "type": "string"
+          },
+          "shapePath": {
+            "type": "string"
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          },
+          "name": {
+            "type": "string"
+          },
+          "fieldId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "fill": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "fontSize": {
+            "type": "number"
+          },
+          "fontFamily": {
+            "type": "string"
+          },
+          "richText": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "kind",
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.update",
+      "wireName": "element_update",
+      "level": "write",
+      "description": "element.update {deck,side,element,patch:{...}} → 改元素任意属性（x/y/width/height/fill/color/fontSize/fieldId/…）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "patch": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element",
+          "patch"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.move",
+      "wireName": "element_move",
+      "level": "write",
+      "description": "element.move {deck,side,element,x,y} → 移动",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element",
+          "x",
+          "y"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.resize",
+      "wireName": "element_resize",
+      "level": "write",
+      "description": "element.resize {deck,side,element,width,height} → 改尺寸",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element",
+          "width",
+          "height"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.style",
+      "wireName": "element_style",
+      "level": "write",
+      "description": "element.style {deck,side,element,fill?,color?,borderColor?,borderWidth?,borderRadius?,fontSize?,fontFamily?,fontWeight?,horizontalAlign?,verticalAlign?} → 改样式",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "fill": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "borderColor": {
+            "type": "string"
+          },
+          "borderWidth": {
+            "type": "number"
+          },
+          "borderRadius": {
+            "type": "number"
+          },
+          "fontSize": {
+            "type": "number"
+          },
+          "fontFamily": {
+            "type": "string"
+          },
+          "fontWeight": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "bold"
+            ]
+          },
+          "horizontalAlign": {
+            "type": "string",
+            "enum": [
+              "left",
+              "center",
+              "right"
+            ]
+          },
+          "verticalAlign": {
+            "type": "string",
+            "enum": [
+              "top",
+              "middle",
+              "bottom"
+            ]
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.rename",
+      "wireName": "element_rename",
+      "level": "write",
+      "description": "element.rename {deck,side,element,name} → 元素改名",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element",
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.bind",
+      "wireName": "element_bind",
+      "level": "write",
+      "description": "element.bind {deck,side,element,fieldId} → 绑定字段（留空解除）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "fieldId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.condition",
+      "wireName": "element_condition",
+      "level": "write",
+      "description": "element.condition {deck,side,element,field,op,value|conditions[],mode,clear} → 显示条件；op: equals/notEquals/gt/gte/lt/lte/contains/isEmpty/isNotEmpty",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "field": {
+            "type": "string",
+            "description": "字段定位：id、名称、名称子串或序号（1 起）"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "equals",
+              "notEquals",
+              "gt",
+              "gte",
+              "lt",
+              "lte",
+              "contains",
+              "isEmpty",
+              "isNotEmpty"
+            ]
+          },
+          "value": {},
+          "conditions": {
+            "type": "array",
+            "items": {}
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "all",
+              "any"
+            ]
+          },
+          "clear": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.countExpand",
+      "wireName": "element_countExpand",
+      "level": "write",
+      "description": "element.countExpand {deck,side,element,fieldId?,max?,spacing?,direction?,slotsField?,slots?,half?,clear?} → 数量展开（按某字段重复绘制）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "fieldId": {
+            "type": "string"
+          },
+          "max": {
+            "type": "number"
+          },
+          "spacing": {
+            "type": "number"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "horizontal",
+              "vertical"
+            ]
+          },
+          "slotsField": {
+            "type": "string"
+          },
+          "slots": {
+            "type": "number"
+          },
+          "half": {
+            "type": "boolean"
+          },
+          "clear": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "element.delete",
+      "wireName": "element_delete",
+      "level": "destructive",
+      "description": "element.delete {deck,side,element} → 删除元素",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          }
+        },
+        "required": [
+          "deck",
+          "side",
+          "element"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "layout.setBackground",
+      "wireName": "layout_setBackground",
+      "level": "write",
+      "description": "layout.setBackground {deck,side,color?,assetId?} → 改版式背景",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "color": {
+            "type": "string"
+          },
+          "assetId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deck",
+          "side"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "layout.setBorder",
+      "wireName": "layout_setBorder",
+      "level": "write",
+      "description": "layout.setBorder {deck,side,color?,width?,radius?} → 改版式边框",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "color": {
+            "type": "string"
+          },
+          "width": {
+            "type": "number"
+          },
+          "radius": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "deck",
+          "side"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "layout.setSize",
+      "wireName": "layout_setSize",
+      "level": "write",
+      "description": "layout.setSize {deck,side,preset|width/height} → 改版式画布尺寸",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "preset": {
+            "type": "string",
+            "enum": [
+              "poker",
+              "bridge",
+              "tarot",
+              "mini",
+              "euro",
+              "square"
+            ]
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "deck",
+          "side"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "layout.clear",
+      "wireName": "layout_clear",
+      "level": "destructive",
+      "description": "layout.clear {deck,side} → 清空该面所有元素",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          }
+        },
+        "required": [
+          "deck",
+          "side"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.list",
+      "wireName": "doc_list",
+      "level": "read",
+      "description": "doc.list {} → 列出文档",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.create",
+      "wireName": "doc_create",
+      "level": "write",
+      "description": "doc.create {title,content} → 新建一篇 Markdown 文档（content 不能为空；要建表格用 doc.createTable）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "content"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.update",
+      "wireName": "doc_update",
+      "level": "write",
+      "description": "doc.update {doc(必填),title?,content?} → 整篇改写；目标必须是普通文档，表格文档请改用 doc.tableSet",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "doc"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.append",
+      "wireName": "doc_append",
+      "level": "write",
+      "description": "doc.append {doc(必填),content} → 末尾追加；目标必须是普通文档，表格文档请改用 doc.tableAddRow",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "doc",
+          "content"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.delete",
+      "wireName": "doc_delete",
+      "level": "destructive",
+      "description": "doc.delete {doc(必填)} → 删除文档",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          }
+        },
+        "required": [
+          "doc"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.read",
+      "wireName": "doc_read",
+      "level": "read",
+      "description": "doc.read {doc(必填),offset?,limit?} → 按字符分页读文档；offset 从 0 起，默认读 2500 字符；按返回的 nextOffset 继续，表格可用 doc.tableRead",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "offset": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "doc"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "conversation.readResult",
+      "wireName": "conversation_readResult",
+      "level": "read",
+      "description": "conversation.readResult {ref,offset?} → 分页读取当前会话保存的完整工具结果",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "ref"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "conversation.search",
+      "wireName": "conversation_search",
+      "level": "read",
+      "description": "conversation.search {query} → 搜索本会话原始历史，返回消息 id 与摘录",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "conversation.readTurn",
+      "wireName": "conversation_readTurn",
+      "level": "read",
+      "description": "conversation.readTurn {id,offset?} → 分段读取历史原文；压缩后需核对早期要求时使用",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "font.list",
+      "wireName": "font_list",
+      "level": "read",
+      "description": "font.list {} → 列出系统字体与项目已上传字体（key、名称）；使用前先查，不能编造字体 key",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "font.set",
+      "wireName": "font_set",
+      "level": "write",
+      "description": "font.set {font,deck?,side?,element?,setDefault?} → 设定字体；font 用 font.list 返回的 key 或精确名称；有 element 时只改该文字；有 deck 时改该牌组，否则改项目全部文字；side: front/back/both，默认 both；setDefault:true 同时设为新建文字默认字体",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "font": {
+            "type": "string"
+          },
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "setDefault": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "font"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "asset.list",
+      "wireName": "asset_list",
+      "level": "read",
+      "description": "asset.list {limit?,kind?} → 列出素材库（kind=image/font 可只看图片或字体）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "image",
+              "font"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "asset.import",
+      "wireName": "asset_import",
+      "level": "write",
+      "description": "asset.import {url,name?} → 由后端抓取外链图片存进素材库，返回可直接使用的素材 id",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "asset.use",
+      "wireName": "asset_use",
+      "level": "write",
+      "description": "asset.use {asset,deck?,side?,element?,name?,x?,y?,width?,height?,imageFit?} → 把素材放进版式：给 element 就替换该插图框的图，否则新建插图框",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "素材定位：id、名称或名称子串"
+          },
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "front",
+              "back"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "description": "元素定位：id、名称、名称子串或序号（1 起）"
+          },
+          "name": {
+            "type": "string"
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          },
+          "imageFit": {
+            "type": "string",
+            "enum": [
+              "cover",
+              "contain"
+            ]
+          }
+        },
+        "required": [
+          "asset"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "asset.rename",
+      "wireName": "asset_rename",
+      "level": "write",
+      "description": "asset.rename {asset,name} → 素材改名",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "素材定位：id、名称或名称子串"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset",
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "asset.delete",
+      "wireName": "asset_delete",
+      "level": "destructive",
+      "description": "asset.delete {asset} → 删除素材",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "素材定位：id、名称或名称子串"
+          }
+        },
+        "required": [
+          "asset"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.createTable",
+      "wireName": "doc_createTable",
+      "level": "write",
+      "description": "doc.createTable {title,header[],rows?[][]} → 新建一篇表格文档",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "header": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "title",
+          "header"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.tableRead",
+      "wireName": "doc_tableRead",
+      "level": "read",
+      "description": "doc.tableRead {doc,limit?,offset?} → 读表格文档（返回 Markdown 表格）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "offset": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "doc"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.tableFind",
+      "wireName": "doc_tableFind",
+      "level": "read",
+      "description": "doc.tableFind {doc,query,column?} → 在表格里按关键词搜行",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "query": {
+            "type": "string"
+          },
+          "column": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "doc",
+          "query"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.tableStats",
+      "wireName": "doc_tableStats",
+      "level": "read",
+      "description": "doc.tableStats {doc} → 表格概况：行列数、列名、空值统计",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          }
+        },
+        "required": [
+          "doc"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.tableSet",
+      "wireName": "doc_tableSet",
+      "level": "write",
+      "description": "doc.tableSet {doc,row,column,value} → 改一个单元格（row 从 1 起，column 用列名或 A/B/C 序号）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "row": {
+            "type": "number"
+          },
+          "column": {
+            "type": "string"
+          },
+          "value": {}
+        },
+        "required": [
+          "doc",
+          "row",
+          "column"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.tableAddRow",
+      "wireName": "doc_tableAddRow",
+      "level": "write",
+      "description": "doc.tableAddRow {doc,values?[]|object} → 追加一行",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "values": {}
+        },
+        "required": [
+          "doc"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.tableAddColumn",
+      "wireName": "doc_tableAddColumn",
+      "level": "write",
+      "description": "doc.tableAddColumn {doc,name,values?[]} → 追加一列",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "name": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": [
+          "doc",
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.tableDeleteRow",
+      "wireName": "doc_tableDeleteRow",
+      "level": "destructive",
+      "description": "doc.tableDeleteRow {doc,row} → 删除一行",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "row": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "doc",
+          "row"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "doc.tableToCards",
+      "wireName": "doc_tableToCards",
+      "level": "write",
+      "description": "doc.tableToCards {doc,deck,mode?} → 把表格导入成卡牌（mode: append|replace）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc": {
+            "type": "string",
+            "description": "文档定位：id、标题或标题子串"
+          },
+          "deck": {
+            "type": "string",
+            "description": "牌组定位：id、名称、名称子串或序号（1 起）"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "append",
+              "replace"
+            ]
+          }
+        },
+        "required": [
+          "doc",
+          "deck"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "web.search",
+      "wireName": "web_search",
+      "level": "read",
+      "description": "web.search {query,maxResults?} → 联网搜索，返回标题/网址/摘要",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "maxResults": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "web.research",
+      "wireName": "web_research",
+      "level": "read",
+      "description": "web.research {query,maxPages?} → 网络调研：搜索并并行读取最多 5 个来源的正文，返回来源网址、时间、正文及各来源失败原因；可继续追问检索和交叉核对",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "maxPages": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "web.fetch",
+      "wireName": "web_fetch",
+      "level": "read",
+      "description": "web.fetch {url,offset?,limit?,maxChars?} → 分页抓取网页正文；默认每页 2500 字符，按 nextOffset 继续；最多抓取 120000 字符",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "number"
+          },
+          "limit": {
+            "type": "number"
+          },
+          "maxChars": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": true
+      }
+    },
+    {
+      "name": "todo.write",
+      "wireName": "todo_write",
+      "level": "write",
+      "description": "todo.write {items:[{text,status}]} → 建立或更新待办清单（status: pending|in_progress|done）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "done"
+                  ]
+                }
+              },
+              "required": [
+                "text",
+                "status"
+              ],
+              "additionalProperties": true
+            }
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "additionalProperties": true
+      }
+    }
+  ]
+}

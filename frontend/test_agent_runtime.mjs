@@ -15,7 +15,7 @@ const D = await load('./src/lib/agentData.ts');
 const L = await load('./src/lib/llm.ts');
 const actions = await load('./src/lib/agentTools.ts', [{ name: 'memory-db', setup(build) {
   build.onResolve({ filter: /db\/schema$/ }, () => ({ path: 'db', namespace: 'memory' }));
-  build.onLoad({ filter: /.*/, namespace: 'memory' }, () => ({ contents: `export const db = { projects: { get: async () => globalThis.testProject } }; export const uid = () => 'new-id'; export const emptyLayout = () => ({}); export const defaultFields = () => [];` }));
+  build.onLoad({ filter: /.*/, namespace: 'memory' }, () => ({ contents: `export const db = { projects: { get: async () => globalThis.testProject }, assets: {where:()=>({equals:()=>({toArray:async()=>[]})})} }; export const uid = () => 'new-id'; export const emptyLayout = () => ({}); export const defaultFields = () => [];` }));
 } }]);
 const json = (calls) => '```json\n' + JSON.stringify({ actions: calls }) + '\n```';
 const add = { tool: 'card.add', args: { name: 'A' } };
@@ -26,6 +26,59 @@ const stream = (value, step = 3) => {
   return new ReadableStream({ start(controller) { for (let i = 0; i < bytes.length; i += step) controller.enqueue(bytes.slice(i, i + step)); controller.close(); } });
 };
 const config = { ...L.defaultLLMConfig(), enabled: true, model: 'fake', baseUrl: 'https://fake.invalid/v1', useProxy: true };
+
+test('project snapshot assets cannot wait forever and user cancellation propagates', async () => {
+  const original=globalThis.fetch;globalThis.testProject={id:'timeout-assets'};
+  try {
+    globalThis.fetch=async(_,init)=>new Promise((resolve,reject)=>{
+      if(init.signal.aborted)return reject(new DOMException('aborted','AbortError'));
+      init.signal.addEventListener('abort',()=>reject(new DOMException('aborted','AbortError')),{once:true});
+    });
+    assert.deepEqual(await actions.listProjectAssets({projectId:'timeout-assets'},{timeoutMs:10}),[]);
+    const ctrl=new AbortController(),pending=actions.listProjectAssets({projectId:'cancel-assets'},{signal:ctrl.signal});
+    setTimeout(()=>ctrl.abort(),10);await assert.rejects(()=>pending,{name:'AbortError'});
+  } finally {globalThis.fetch=original;}
+});
+
+test('web tools are filtered when disabled and research is native callable', () => {
+  const names = P.buildToolDefinitions().map(x => x.function.name);
+  assert.ok(names.includes('web_research')); assert.ok(!names.includes('web_weather'));
+  assert.ok(!P.buildToolDefinitions([], false).some(x => x.function.name.startsWith('web_')));
+  assert.ok(!P.buildSystemPrompt({snapshot:'test', web:false}).includes('- web.research'));
+});
+
+test('tool JSON and raw results stay out of chat while full results reach the next model turn', async () => {
+  const shown = []; let round = 0;
+  const raw = json([{tool:'web.research',args:{query:'SECRET_PARAMETER'}}]);
+  const result = await R.runAgent({userText:'调研',history:[],outputTokens:4096,system:async()=>'',
+    complete:async(messages,delta,finish)=>{
+      if (round++ === 0) { for (const char of raw) delta(char); finish('stop'); return {content:raw,toolCalls:[]}; }
+      assert.ok(messages.some(m=>m.content.includes('RAW_TOOL_RESULT')));
+      delta('查询完成。'); finish('stop'); return {content:'查询完成。',toolCalls:[]};
+    }, execute:async()=>({text:'RAW_TOOL_RESULT',records:[],approved:[]}),onText:value=>shown.push(value)});
+  assert.equal(result.status,'completed'); assert.equal(shown.at(-1),'查询完成。');
+  assert.ok(shown.every(value=>!value.includes('SECRET_PARAMETER')&&!value.includes('RAW_TOOL_RESULT')));
+  assert.equal(R.visibleAgentReply('说明\n```json\n{"'), '说明');
+  assert.equal(R.visibleAgentReply('```json\n{"foo":1}\n```'), '```json\n{"foo":1}\n```');
+});
+
+test('web actions respect permissions, context provider, empty results and cancellation', async () => {
+  const original = globalThis.fetch; const requests=[];
+  globalThis.testProject={id:'p',content:{decks:[],documents:[]}};
+  try {
+    const make=web=>actions.createAgentActions({projectId:'p',mutate:async()=>{},toast:()=>{},web,webProvider:'brave',webApiKey:'TEST_KEY'});
+    globalThis.fetch=async(url,init)=>{requests.push([url,JSON.parse(init.body)]);return Response.json(url.endsWith('/search')?[]:{status:'ok',read_count:1});};
+    const disabled=make(false);
+    for (const name of ['web.research','web.search','web.fetch']) assert.match(await disabled[name]({query:'q',location:'上海',url:'https://example.com'}),/^❌/);
+    assert.equal(requests.length,0);
+    const enabled=make(true);
+    assert.match(await enabled['web.search']({query:'q'}),/^❌/);
+    await enabled['web.research']({query:'test',maxPages:99});
+    assert.equal(requests.at(-1)[1].provider,'brave'); assert.equal(requests.at(-1)[1].api_key,'TEST_KEY'); assert.equal(requests.at(-1)[1].max_pages,5);
+    globalThis.fetch=async()=>{throw new DOMException('aborted','AbortError');};
+    await assert.rejects(()=>enabled['web.research']({query:'test'}),{name:'AbortError'});
+  } finally {globalThis.fetch=original;}
+});
 
 test('SSE preserves Chinese byte fragments, reasoning, finish reason and final line without newline', async () => {
   let text = '', reasoning = '', reason = '';
@@ -488,4 +541,63 @@ test('128K manual output survives actual proxy and direct requests; summary over
   await L.chatStream({cfg,messages:[]});assert.equal(body.max_tokens,131072);
   await L.chatStream({cfg:{...cfg,outputMode:'auto'},maxTokens:1800,messages:[]});assert.equal(body.max_tokens,1800);
  }}finally{globalThis.fetch=original;}
+});
+
+test('default budget completes tasks beyond twelve turns and repeated reads stop early',async()=>{
+ let n=0;
+ const result=await R.runAgent({userText:'long task',history:[],outputTokens:4096,system:async()=>'',onText:()=>{},
+ complete:async(_,delta,finish)=>{const content=n<15?json([{tool:'card.list',args:{offset:n++}}]):'完成';finish('stop');return {content,toolCalls:[]};},
+ execute:async()=>({text:`page ${n}`,records:[],approved:[]})});
+ assert.equal(result.status,'completed');assert.equal(result.rounds,16);
+ let calls=0;
+ const repeated=await R.runAgent({userText:'read',history:[],outputTokens:4096,system:async()=>'',onText:()=>{},
+ complete:async(_,delta,finish)=>{calls++;finish('stop');return {content:json([{tool:'deck.list',args:{}}]),toolCalls:[]};},
+ execute:async()=>({text:'same result',records:[],approved:[]})});
+ assert.equal(repeated.status,'blocked');assert.ok(calls<=4);
+});
+
+test('completion gate continues unfinished work and never silently marks pending tasks complete',async()=>{
+ let requests=0;const states=[];
+ const result=await R.runAgent({userText:'task',history:[],outputTokens:4096,system:async()=>'',onText:()=>{},
+ onTaskState:async s=>states.push(s),completionCheck:async()=> '尚有技能块未创建',
+ complete:async()=>{requests++;return {content:'已经完成',toolCalls:[]};},execute:async()=>{throw new Error('unexpected');}});
+ assert.equal(result.status,'blocked');assert.equal(requests,2);assert.ok(states.some(s=>s.phase==='verifying'));
+});
+test('runtime context packing preserves original checkpoint data',async()=>{
+ let i=0;const checkpoints=[];let sawPacked=false;
+ const result=await R.runAgent({userText:'task',history:[],contextWindow:24000,outputTokens:1000,system:async()=>'',onText:()=>{},
+ onCheckpoint:async m=>checkpoints.push(m),
+ complete:async messages=>{sawPacked ||= messages.some(m=>m.content.includes('较早工具结果已缩略'));return i++<5?{content:json([{tool:'card.list',args:{offset:i}}]),toolCalls:[]}:{content:'完成',toolCalls:[]};},
+ execute:async()=>({text:'x'.repeat(8000),records:[],approved:[]})});
+ assert.equal(result.status,'completed');assert.ok(sawPacked);assert.ok(checkpoints.at(-1).some(m=>m.content.includes('x'.repeat(8000))));
+});
+
+test('productive tasks extend stage budgets but never exceed configured hard limits',async()=>{
+ let calls=0;const stages=[];
+ const result=await R.runAgent({userText:'task',history:[],maxRounds:20,outputTokens:4096,system:async()=>'',onText:()=>{},onTaskState:async s=>stages.push(s),
+ complete:async(_,delta,finish)=>{finish('stop');return {content:json([{tool:'card.list',args:{offset:calls++}}]),toolCalls:[]};},
+ execute:async()=>({text:`page ${calls}`,records:[],approved:[]})});
+ assert.equal(result.status,'round_limit');assert.equal(calls,20);
+ assert.ok(stages.some(s=>s.phase==='continuing'&&s.budget===20));assert.ok(stages.every(s=>!s.budget||s.budget<=20));
+});
+test('empty results do not earn extra stage budget',async()=>{
+ let calls=0;
+ const result=await R.runAgent({userText:'task',history:[],maxRounds:32,outputTokens:4096,system:async()=>'',onText:()=>{},
+ complete:async()=>({content:json([{tool:'card.list',args:{offset:calls++}}]),toolCalls:[]}),execute:async()=>({text:'',records:[],approved:[]})});
+ assert.equal(result.status,'round_limit');assert.equal(result.rounds,16);assert.equal(calls,16);
+});
+
+const Routing=await load('./src/lib/toolRouting.ts');
+test('deferred tool discovery reduces initial tokens and exposes schemas on demand',async()=>{
+ const full=P.buildToolDefinitions(),router=Routing.createToolRouter('你好');
+ const initial=router.definitions();assert.ok(initial.length<=5);
+ assert.ok(C.contextTokens(JSON.stringify(initial))<C.contextTokens(JSON.stringify(full))*.25);
+ await router.discover({names:['card.add','design.execute']});
+ assert.ok(router.definitions().some(d=>d.function.name==='card_add'));
+ assert.ok(router.definitions().some(d=>d.function.name==='design_execute'));
+ const off=Routing.createToolRouter('天气',[],false);await off.discover({query:'web'});
+ assert.ok(!off.definitions().some(d=>d.function.name.startsWith('web_')));
+ const extra={type:'function',function:{name:'mcp__example__find',description:'查找远程记录',parameters:{type:'object',properties:{q:{type:'string'}}}}};
+ const remote=Routing.createToolRouter('hello',[extra]);assert.ok(!remote.definitions().some(d=>d.function.name===extra.function.name));
+ await remote.discover({names:[extra.function.name]});assert.ok(remote.definitions().some(d=>d.function.name===extra.function.name));
 });

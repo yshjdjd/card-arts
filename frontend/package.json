@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty",
     "test:agent": "node test_agent_protocol.mjs && node test_agent_runtime.mjs && node test_thinking.mjs",
+    "test:cardfields": "node test_card_drafts.mjs",
     "test:documents": "node test_document_drafts.mjs",
     "test:design": "node test_design_tools.mjs"
   },

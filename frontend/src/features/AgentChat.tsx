@@ -1,3 +1,4 @@
+import {createToolRouter} from '../lib/toolRouting';
 import { resolveCapacity, autoCompactThreshold, modelScope } from '../lib/modelCapacity';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
@@ -33,9 +34,10 @@ import type { RunResult, ToolRecord } from '../lib/agentProtocol';
 import { allSkills, defaultSkillKeys } from '../lib/skills';
 import type { AgentContext, ChatSession, LLMConfig, ProjectDocument, SkillDef, TodoItem } from '../lib/types';
 import { formatDate } from '../lib/utils';
+import { api } from '../api/client';
 
 const WEB_PROVIDERS: { key: string; label: string; needKey: boolean }[] = [
-  { key: 'auto', label: '自动（DuckDuckGo → 维基百科）', needKey: false },
+  { key: 'auto', label: '默认（DuckDuckGo，无需 Key）', needKey: false },
   { key: 'duckduckgo', label: 'DuckDuckGo（免费，无需 Key）', needKey: false },
   { key: 'wikipedia', label: '维基百科（免费，无需 Key）', needKey: false },
   { key: 'tavily', label: 'Tavily（需 Key，质量最好）', needKey: true },
@@ -171,13 +173,13 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
    * 把「工程快照 + 挂载的知识包 + 挂载的文档 + 待办」拼成系统提示词。
    * 每次请求都保留工具说明和挂载资料；模型服务不会记住被替换的系统消息。
    */
-  const buildPrompt = useCallback(async (): Promise<string> => {
+  const buildPrompt = useCallback(async (signal?: AbortSignal): Promise<string> => {
     const liveProject = await db.projects.get(projectId);
     const liveChat = await db.chats.get(activeId);
     const currentDocs = liveProject?.content?.documents ?? docs;
     const snapshot = await projectOverview({
       projectId, projectName: liveProject?.name ?? project?.name ?? '', update, rename,
-    });
+    }, signal, true);
     const skills: PromptRef[] = allSkills(agentCtx.customSkills ?? [])
       .filter((s) => (agentCtx.skills ?? []).includes(s.key))
       .map((s) => ({ title: `${s.name}`, content: s.body }));
@@ -286,6 +288,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
       }
     }
     let runStatus = 'running';
+    let taskProgress: {round:number;phase:string;lastTools:string[];budget?:number;hardLimit?:number}|undefined;
     let savedItems = 0;
     let contextStats: { dropped: number; estimatedTokens: number } | undefined;
 
@@ -301,7 +304,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
       lastFlush = now;
       const r = think;
       const content = acc;
-      const run = { status: runStatus, context: contextStats, records: records.map((x) => ({ ...x })) };
+      const run = { status: runStatus, task:taskProgress, context: contextStats, records: records.map((x) => ({ ...x })) };
       chain = chain.then(() => patchLastMessage(chatId, content, r, messageId, run)).catch((error) => { storageError = error; });
     };
 
@@ -314,7 +317,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
     const run = async (calls: ToolCall[]): Promise<RunResult> => {
       const res = await runToolCalls(calls, effectiveActions, {
         beforeCall: async (call) => revisionGuard.before((await db.projects.get(projectId))?.localRevision, levelOf(call.tool) === 'read'),
-        afterCall: async (call) => revisionGuard.after((await db.projects.get(projectId))?.localRevision, levelOf(call.tool) === 'read' && /^(project\.|deck\.|card\.|field\.|layout\.|element\.)/.test(call.tool)),
+        afterCall: async (call) => revisionGuard.after((await db.projects.get(projectId))?.localRevision, levelOf(call.tool) === 'read' && /^(project\.|deck\.|card\.|field\.|layout\.|layer\.|template\.|design\.|element\.)/.test(call.tool)),
         storeResult: (tool, content) => saveToolResult(chatId, tool, content),
         approve: askApprove,
         approved: runApproved,
@@ -370,7 +373,8 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
       const outputTokens = resolveOutputBudget(cfg,model).value;
       // 拉取外部 MCP server 提供的工具（拉不到就静默退化为仅核心工具）
       const remote = await fetchRemoteTools(ctrl.signal);
-      effectiveActions = { ...actions, ...buildMcpActions(remote.tools), ...historyTools(chat.messages), ...resultTools(chatId) };
+      const router=createToolRouter(text,remote.defs,agentCtx.web!==false);
+      effectiveActions = { ...actions, ...buildMcpActions(remote.tools), ...historyTools(chat.messages), ...resultTools(chatId), 'tools.discover':router.discover };
       let modelHistory = chat.messages;
       const oldSummaryIndex = chat.summary ? chat.messages.findIndex((m) => m.id === chat.summary!.throughMessageId) : -1;
       const pendingHistory = chat.messages.slice(oldSummaryIndex + 1);
@@ -387,32 +391,44 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
       }
       const summaryIndex = chat.summary ? chat.messages.findIndex((m)=>m.id===chat.summary!.throughMessageId) : -1;
       if (summaryIndex >= 0) modelHistory = chat.messages.slice(summaryIndex + 1);
+      const taskKey=`agent-task:${chatId}`;
+      const previousTask=(await db.settings.get(taskKey))?.value as {goal?:string}|undefined;
+      const taskGoal=/^(继续|继续执行|接着做|resume|continue)[。！!\s]*$/i.test(text.trim())?previousTask?.goal||text:text;
+      let executedThisRun=false;
+      const taskUsage={requests:0,reported:0,prompt_tokens:0,completion_tokens:0,total_tokens:0};
       const result = await runAgent({
+        onTaskState:async(state)=>{if(state.phase==='executing')executedThisRun=true;taskProgress={...taskProgress,...state};await db.settings.put({key:taskKey,value:{...taskProgress,goal:taskGoal,messageId,updatedAt:new Date().toISOString()}});write(true);await chain;},
+        completionCheck:async()=>{if(!executedThisRun&&taskGoal===text)return '';const current=await db.chats.get(chatId);return (current?.todos??[]).filter(t=>t.status!=='done').map(t=>t.text).join('；').slice(0,2000);},
         userText: text,
         history: restoreHistory(modelHistory),
-        toolTokens: contextTokens(JSON.stringify(buildToolDefinitions(remote.defs))),
+        get toolTokens(){return contextTokens(JSON.stringify(router.definitions()));},
         onCheckpoint: async (messages) => { if (!messageId) throw new Error("缺少运行 ID"); savedItems = await saveAgentItems(chatId, messageId, messages, savedItems); write(true); await chain; if (storageError) throw storageError; },
         onContext: (stats) => { contextStats = stats; },
-        system: buildPrompt,
+        system: async () => `${await buildPrompt(ctrl.signal)}\n\n当前持续任务目标：${taskGoal}\n本次执行阶段：${taskProgress?.phase??'planning'}；轮次：${taskProgress?.round??1}。按当前真实工程和待办继续；先验证再交付。`,
+        maxRounds: cfg.agentMaxRounds,
         outputTokens,
         contextWindow: resolveCapacity(cfg, model).tokens,
         signal: ctrl.signal,
         complete: async (messages, onDelta, onFinish) => {
           const key = `agent-context:${chatId}`;
-          const snapshot = {messages,tools:buildToolDefinitions(remote.defs),model,createdAt:new Date().toISOString(),window:resolveCapacity(cfg, model).tokens,outputTokens};
-          await db.settings.put({key,value:snapshot});
+          const snapshot = {messages,tools:router.definitions(),model,createdAt:new Date().toISOString(),window:resolveCapacity(cfg, model).tokens,outputTokens};
+          await db.settings.put({key,value:{...snapshot,taskUsage:{...taskUsage}}});
           const completion = await chatStream({
           cfg, messages, model, signal: ctrl.signal, onDelta, onFinish,
-          tools: buildToolDefinitions(remote.defs),
+          tools: router.definitions(),
           onReasoning: (delta) => { think += delta; write(); },
           });
-          await db.settings.put({key,value:{...snapshot,usage:completion.usage}});
+          taskUsage.requests++;
+          if(completion.usage){taskUsage.reported++;taskUsage.prompt_tokens+=completion.usage.prompt_tokens??0;taskUsage.completion_tokens+=completion.usage.completion_tokens??0;taskUsage.total_tokens+=completion.usage.total_tokens??((completion.usage.prompt_tokens??0)+(completion.usage.completion_tokens??0));}
+          await db.settings.put({key,value:{...snapshot,usage:completion.usage,taskUsage:{...taskUsage}}});
           return completion;
         },
         execute: run,
         onText: (value) => { acc = value; write(); },
       });
       runStatus = result.status;
+      taskProgress={...taskProgress,round:result.rounds,phase:result.status,lastTools:[]};
+      await db.settings.put({key:taskKey,value:{...taskProgress,goal:taskGoal,messageId,updatedAt:new Date().toISOString()}});
 
       await write(true);
       await chain;
@@ -443,6 +459,10 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
         toast('助手执行失败', 'err');
       }
     } finally {
+      if(taskProgress&&runStatus!=='running'){
+        taskProgress={...taskProgress,phase:runStatus};
+        try{const key=`agent-task:${chatId}`;const saved=await db.settings.get(key);if(saved)await db.settings.put({key,value:{...(saved.value as object),...taskProgress,updatedAt:new Date().toISOString()}});}catch{/* 原始保存错误由现有提示处理。 */}
+      }
       abortRef.current = null;
       runLock.current = false;
       if (storageError) toast(`会话保存失败：${storageError.message}`, 'err');
@@ -649,7 +669,7 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
                 {modelLabel}
                 {cfg?.enabled && <div style={{ marginTop: 4 }}>可直接改工程 · {TOOL_NAMES.length} 个工具</div>}
                 <div style={{ marginTop: 4 }}>
-                  {agentCtx.web === false ? '🚫 未联网' : '🌐 可联网'}
+                  {agentCtx.web === false ? '🚫 联网未启用' : '🌐 允许联网'}
                   {mountedDocs ? ` · 📎${mountedDocs} 文档` : ''}
                   {mountedSkills ? ` · 📚${mountedSkills} 知识包` : ''}
                 </div>
@@ -710,10 +730,11 @@ export default function AgentChat({ onClose }: { onClose: () => void }) {
                 {active?.messages.map((m) => (
                   <div key={m.id} className={`msg ${m.role === 'user' ? 'me' : m.role === 'system' ? 'sys' : 'ai'}`}>
                     {!busy && <button className="btn ghost sm" onClick={() => { void db.chats.get(active.id).then(async (current) => { if (!current) return; const fork = forkSession(await hydrateAgentItems(current), m.id, crypto.randomUUID()); await db.transaction('rw', db.chats, db.agentResults, async () => { const rows = await db.agentResults.where('chatId').equals(current.id).toArray(); await db.agentResults.bulkPut(rows.map((r) => ({...r, chatId: fork.id}))); await db.chats.put(fork); }); setActiveId(fork.id); }); }}>从此处分支</button>}
+                    {m.agentRun?.task&&<details className="small faint"><summary>任务进度 · 第 {m.agentRun.task.round} 轮 · {m.agentRun.task.phase}</summary><div>预算：{m.agentRun.task.budget??'—'} / 硬上限 {m.agentRun.task.hardLimit??'—'} 轮。最近工具：{m.agentRun.task.lastTools.join('、')||'无'}。完整结果见执行记录；中断后发送“继续”核对现状并恢复。</div></details>}
                     {m.reasoning ? <ThinkingBlock text={m.reasoning} streaming={busy} /> : null}
                     {m.content || (busy ? '…' : '')}
                     {!busy && m.agentRun?.status === 'running' && <div className="small faint">上次运行已中断。可发送“继续”，先核对工程状态。</div>}
-                    {m.agentRun?.context && <div className="small faint">本轮上下文约 {m.agentRun.context.estimatedTokens} tokens（含工具定义，估算）；未发送较早历史 {m.agentRun.context.dropped} 条，可查询原文。</div>}
+                    {m.agentRun?.context && <details className="small faint"><summary>上下文用量</summary>本轮约 {m.agentRun.context.estimatedTokens} tokens（含工具定义，估算）；未发送较早历史 {m.agentRun.context.dropped} 条，可查询原文。</details>}
                     {!!m.agentRun?.records.length && (
                       <details className="small mt8">
                         <summary>执行记录（{m.agentRun.records.length}）</summary>
@@ -841,6 +862,19 @@ function ContextPanel({
   const toast = useToast();
   const [draft, setDraft] = useState<SkillDef | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const [webTesting, setWebTesting] = useState(false);
+  const [webTestResult, setWebTestResult] = useState('');
+  const webTestConfig = `${ctx.webProvider || 'auto'}:${ctx.webApiKey || ''}`;
+  useEffect(() => { setWebTestResult(''); }, [webTestConfig]);
+  const testWeb = async () => {
+    setWebTesting(true);
+    setWebTestResult('正在检测通用搜索服务…');
+    try {
+      const items=await api.webSearch({query:'card game design',provider:ctx.webProvider||'auto',api_key:ctx.webApiKey||'',max_results:1});
+      setWebTestResult(items.length?'搜索可用。此检测不保证所有目标网页均能读取。':'搜索无结果，尚未确认可用。');
+    }catch(error){setWebTestResult(`搜索失败：${(error as Error).message}`);}
+    setWebTesting(false);
+  };
 
   const skills = allSkills(ctx.customSkills ?? []);
   const on = (k: string) => (ctx.skills ?? []).includes(k);
@@ -904,13 +938,13 @@ function ContextPanel({
           <div className="ctx-hd">🌐 联网</div>
           <label className="row small" style={{ gap: 6 }}>
             <input type="checkbox" checked={ctx.web !== false} onChange={(e) => onChange({ web: e.target.checked })} />
-            允许助手调用 web.search / web.fetch（经由本地后端，绕开浏览器跨域）
+            允许助手调用网络搜索、调研和网页读取工具（由后端执行）
           </label>
           {ctx.web !== false && (
             <div className="row mt8" style={{ gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
               <div className="field" style={{ flex: '1 1 220px' }}>
                 <label className="lbl">搜索引擎</label>
-                <select className="input" value={provider.key} onChange={(e) => onChange({ webProvider: e.target.value })}>
+                <select className="input" disabled={webTesting} value={provider.key} onChange={(e) => onChange({ webProvider: e.target.value })}>
                   {WEB_PROVIDERS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
                 </select>
               </div>
@@ -920,6 +954,7 @@ function ContextPanel({
                   <input
                     className="input mono"
                     type="password"
+                    disabled={webTesting}
                     value={ctx.webApiKey ?? ''}
                     placeholder="该通道的密钥"
                     onChange={(e) => onChange({ webApiKey: e.target.value })}
@@ -929,8 +964,10 @@ function ContextPanel({
             </div>
           )}
           <div className="small faint mt8">
-            不填 Key 也能用：默认走 DuckDuckGo，失败自动退回维基百科。抓正文用 web.fetch，模型会自动去噪并截断。
+            开启代表允许调用，实际可用性取决于后端网络和搜索通道。默认 DuckDuckGo 可能超时或要求验证，可配置 Tavily / Brave / Serper；维基百科仅查百科资料。web.research 搜索并读取多个网页，web.fetch 读取指定网址。
           </div>
+          {ctx.web !== false && <button className="btn sm mt8" disabled={webTesting} onClick={() => void testWeb()}>{webTesting ? '检测中…' : '检测搜索连接'}</button>}
+          {webTestResult && <div role="status" className="small mt8" style={{whiteSpace: 'pre-wrap'}}>{webTestResult}</div>}
         </div>
 
         {/* 文档 */}
@@ -1353,7 +1390,10 @@ function LLMConfigPanel({
         </div>
 
         <div className="field mt8">
-          <label className="lbl">附加提示词（会拼在内置工具说明之后，可留空）</label>
+          <label className="lbl">单次任务执行轮数</label>
+          <input className="input" type="number" min={1} max={96} value={cfg?.agentMaxRounds??32} onChange={e=>onChange({...cfg,agentMaxRounds:Math.max(1,Math.min(96,Math.floor(Number(e.target.value)||32)))})}/>
+          <div className="small faint">默认 32，最多 96。每轮为一次模型请求，可执行多个工具；复杂制卡可设 48–64。增加轮数可能增加耗时和模型费用，停止按钮仍可随时取消。</div>
+          <label className="lbl mt8">附加提示词（会拼在内置工具说明之后，可留空）</label>
           <textarea
             className="input"
             rows={3}

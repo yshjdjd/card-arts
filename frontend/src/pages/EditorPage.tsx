@@ -1,9 +1,24 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {remapContainerRefs} from '../lib/designSystem';
+import VectorPathEditor, {importVectorSvg} from '../features/editor/VectorPathEditor';
+import CardFieldEditor, { CardFieldInput } from '../features/editor/CardFieldEditor';
+import { SHAPES, shapeProperties } from '../lib/shapes';
+import { projectCardDrafts } from '../db/cardDraftRegistry';
+import { boundFieldIds, cardDraftKey } from '../lib/cardDrafts';
+import RichTextEditor from '../features/editor/RichTextEditor';
+import DesignPanel from '../features/editor/DesignPanel';
+import { designCommand } from '../lib/designCommands';
+import { anchorElement, markOverrides, resolveDesignLayout, validateDesignPatch } from '../lib/designSystem';
+import { checkDesignCard } from '../lib/designPreflight';
+import TemplateLibrary from '../features/editor/TemplateLibrary';
+import { instantiateTemplate, captureTemplate, allCardTemplates } from '../lib/cardTemplates';
+import LayerPanel from '../features/editor/LayerPanel';
+import { applyLayers } from '../lib/layers';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useProject, useAssets } from '../state/store';
 import { useToast, useConfirm, Modal, Select, NumberInput, ColorInput, Empty } from '../components/ui';
 import { AssetField, uploadImageFiles } from '../components/AssetPicker';
 import type { Card, Deck, ElementKind, Field, Layout, LayoutElement } from '../lib/types';
-import { renderLayout, renderToCanvas, type ImageLike } from '../lib/render';
+import { renderLayout, renderToCanvas, resolveCardDesign, evaluate, type ImageLike } from '../lib/render';
 import { useLayoutImages } from '../lib/useImages';
 import { CARD_PRESETS, FONTS } from '../lib/presets';
 import { clamp, move, uid } from '../lib/utils';
@@ -14,10 +29,10 @@ import { fontKey } from '../lib/fontIdentity';
 import { previewUrl } from '../api/uploader';
 
 const KIND_LABEL: Record<ElementKind, string> = {
-  text: '文本', image: '图片', icon: '图标', rectangle: '矩形', ellipse: '椭圆', line: '线条',
+  text: '文本', image: '图片', icon: '图标', rectangle: '矩形', ellipse: '椭圆', line: '线条', path: '矢量路径',
 };
 const KIND_ICON: Record<ElementKind, string> = {
-  text: 'T', image: '🖼', icon: '✨', rectangle: '▭', ellipse: '◯', line: '—',
+  text: 'T', image: '🖼', icon: '✨', rectangle: '▭', ellipse: '◯', line: '—', path: '⌁',
 };
 
 export default function EditorPage() {
@@ -29,6 +44,9 @@ export default function EditorPage() {
   const decks = content.decks ?? [];
   const [deckId, setDeckId] = useState(decks[0]?.id ?? '');
   const deck = decks.find((d) => d.id === deckId) ?? decks[0];
+  const [showDesign,setShowDesign]=useState(false),[showGrid,setShowGrid]=useState(false),[gridSize,setGridSize]=useState(25),[comparison,setComparison]=useState<Layout|null>(null),[showComparison,setShowComparison]=useState(false);
+  const [showTemplates,setShowTemplates]=useState(false);
+  const [inlineField,setInlineField]=useState<{element:string;field:string}|null>(null);
   const [side, setSide] = useState<'front' | 'back'>('front');
   const [zoom, setZoom] = useState(0.5);
   const [selected, setSelected] = useState<string[]>([]);
@@ -51,9 +69,28 @@ export default function EditorPage() {
   const clipboard = useRef<LayoutElement[]>([]), space = useRef(false), cleanup = useRef<(() => void) | null>(null);
   const layoutKey = side === 'front' ? 'frontLayout' : 'backLayout';
   const stored = deck?.[layoutKey] ?? null;
-  const layout = preview ?? stored;
-  const cards = deck?.cards ?? [];
+  const sourceLayout = preview ?? stored;
+  const drafts=useMemo(()=>projectCardDrafts(project?.id??''),[project?.id]);
+  useSyncExternalStore(drafts.subscribe,drafts.snapshot);
+  useEffect(()=>{drafts.reconcile(content.decks);},[drafts,content.decks]);
+  useEffect(()=>{
+    const leaving=(event:BeforeUnloadEvent)=>{if(drafts.hasUnsaved()){event.preventDefault();event.returnValue='';}};
+    window.addEventListener('beforeunload',leaving);
+    return ()=>{window.removeEventListener('beforeunload',leaving);void drafts.flushAll(true).then(ok=>{if(!ok)toast('卡牌数据尚未保存，草稿已保留；返回版式编辑器重试','err');});};
+  },[drafts]);
+  const cards = (deck?.cards??[]).map(card=>drafts.view(deck.id,card));
   const sampleCard = cards[Math.min(sampleIdx, Math.max(0, cards.length - 1))] ?? null;
+  const activeCardKey=sampleCard&&deck?cardDraftKey(deck.id,sampleCard.id):'';
+  const flushCards=async()=>{const ok=await drafts.flushAll();if(!ok)toast(drafts.error(activeCardKey)||'请完成输入或重试保存后再切换','err');return ok;};
+  const selectCard=async(index:number)=>{if(await flushCards()){setInlineField(null);setCropId(null);setCropDraft(null);setSampleIdx(Math.max(0,Math.min(cards.length-1,index)));}};
+  const changeDeck=async(id:string)=>{if(await flushCards()){setInlineField(null);setDeckId(id);}};
+  const changeSide=async(value:'front'|'back')=>{if(await flushCards()){setInlineField(null);setSide(value);}};
+  const newCard=async()=>{
+    if(!deck||!await flushCards())return;const id=deck.id;let index=0;
+    await update(c=>{const d=c.decks.find(d=>d.id===id);if(!d)throw new Error('牌组已不存在');const values:Record<string,unknown>={};for(const f of d.fields)values[f.id]=f.defaultValue??(f.id==='name'?'新卡牌':f.id==='count'?1:f.type==='number'?0:f.type==='boolean'?false:'');index=d.cards.length;d.cards.push({id:uid(),values});},'版式中新建卡牌');setSampleIdx(index);setInlineField(null);
+  };
+  const measureContext=useMemo(()=>document.createElement('canvas').getContext('2d')!,[]);
+  const layout=useMemo(()=>sourceLayout?resolveCardDesign(measureContext,sourceLayout,sampleCard?.values??{}):null,[sourceLayout,sampleCard?.values,measureContext]);
   const { images, icons, ready, error: renderError } = useLayoutImages([deck?.frontLayout, deck?.backLayout], assets, cards, deck?.fields || []);
   const selection = layout?.elements.filter((e) => selected.includes(e.id) && !e.hidden && !e.locked) ?? [];
   const sel = selection.length === 1 ? selection[0] : null;
@@ -66,7 +103,7 @@ export default function EditorPage() {
     if (cropDraft) overrides[cropId] = { ...overrides[cropId], ...cropDraft };
     return { ...sampleCard, layoutOverrides: overrides };
   }, [sampleCard, cropId, cropPerCard, cropDraft]);
-  useEffect(() => { cleanup.current?.(); setPreview(null); setCropId(null); setCropDraft(null); setSelected([]); setIssues([]); setSampleIdx(0); setGalleryPage(0); }, [deck?.id, side]);
+  useEffect(() => { cleanup.current?.(); setPreview(null); setCropId(null); setCropDraft(null); setSelected([]); setIssues([]); setSampleIdx(0); setGalleryPage(0);setComparison(null);setInlineField(null); }, [deck?.id, side]);
   useEffect(() => () => cleanup.current?.(), []);
   const patchLayout = async (fn: (l: Layout) => void, label = '编辑版式') => {
     const id = deck?.id;
@@ -78,18 +115,19 @@ export default function EditorPage() {
     }, label); } catch (error) { toast((error as Error).message, 'err'); }
   };
   const patchElement = (id: string, patch: Partial<LayoutElement>, label = '修改元素') => patchLayout((l) => {
-    const el = l.elements.find((e) => e.id === id); if (el) Object.assign(el, patch);
+    const el = l.elements.find((e) => e.id === id); if (el) { markOverrides(el,patch);Object.assign(el, patch);if(el.anchors&&['x','y','width','height'].some(k=>k in patch))el.anchors=anchorElement(l,el,el.anchors.horizontal,el.anchors.vertical); }
   }, label);
   const patchMany = (elements: LayoutElement[], label: string) => patchLayout((l) => {
-    for (const next of elements) { const el = l.elements.find((e) => e.id === next.id); if (el && !el.locked) Object.assign(el, next); }
+    for (const next of elements) { const el = l.elements.find((e) => e.id === next.id); if (el && !el.locked) {const patch=Object.fromEntries(Object.entries(next).filter(([k,v])=>JSON.stringify(v)!==JSON.stringify((el as any)[k])));markOverrides(el,patch);Object.assign(el,next);if(el.anchors)el.anchors=anchorElement(l,el,el.anchors.horizontal,el.anchors.vertical);} }
   }, label);
   useEffect(() => {
     if (!layout || !ready) return;
     const canvasLayout = cropDraft && cropId && !sampleCard ? { ...layout, elements: layout.elements.map((el) => el.id === cropId ? { ...el, ...cropDraft } : el) } : layout;
-    const cv = renderToCanvas(canvasLayout, cardForRender, { values: cardForRender?.values ?? {}, images, icons, scale: zoom, placeholders: true }, deck?.fields ?? []);
+    const cv = renderToCanvas(canvasLayout, cardForRender, { values: cardForRender?.values ?? {}, images, icons, scale: zoom, workspacePadding: 600, placeholders: true }, deck?.fields ?? []);
     const target = canvasRef.current; if (!target) return;
     target.width = cv.width; target.height = cv.height; target.getContext('2d')?.drawImage(cv, 0, 0);
   }, [layout, cardForRender, cropDraft, cropId, images, icons, ready, zoom, deck?.fields]);
+  useEffect(()=>{const frame=requestAnimationFrame(()=>{const wrap=wrapRef.current,stage=stageRef.current;if(wrap&&stage){wrap.scrollLeft=stage.offsetLeft+stage.offsetWidth/2-wrap.clientWidth/2;wrap.scrollTop=stage.offsetTop+stage.offsetHeight/2-wrap.clientHeight/2;}});return()=>cancelAnimationFrame(frame);},[layout?.id]);
   const point = (e: { clientX: number; clientY: number }) => {
     const r = stageRef.current!.getBoundingClientRect(); return { x: (e.clientX - r.left) / zoom, y: (e.clientY - r.top) / zoom };
   };
@@ -143,6 +181,7 @@ export default function EditorPage() {
     const hits = e.altKey ? [hit.id] : selectionIds(layout.elements, [hit.id]);
     let ids = selected.includes(hit.id) ? selected : hits;
     if (e.shiftKey && !handle) { ids = selected.includes(hit.id) ? selected.filter((id) => !hits.includes(id)) : [...new Set([...selected, ...hits])]; setSelected(ids); return; }
+    if(layout.flows?.some(f=>f.ids.some(id=>ids.includes(id)))){toast('所选元素由自动布局管理，请先解除自动布局再拖动','info');return;}
     setSelected(ids); setCropId(null);
     const elements = layout.elements.filter((el) => ids.includes(el.id) && !el.locked && !el.hidden);
     const origin = bounds(elements); let final: LayoutElement[] | null = null;
@@ -165,6 +204,8 @@ export default function EditorPage() {
         }
       }
       final = handle && elements.length === 1 && elements[0].rotation ? [resizedRotated(elements[0], dx, dy, handle, event.shiftKey)] : transformElements(elements, origin, target);
+      final.forEach(el=>{if(el.anchors)el.anchors=anchorElement(layout,el,el.anchors.horizontal,el.anchors.vertical);});
+      if(snap&&showGrid&&!event.altKey&&!handle){final=final.map(el=>({...el,x:Math.round(el.x/gridSize)*gridSize,y:Math.round(el.y/gridSize)*gridSize}));final.forEach(el=>{if(el.anchors)el.anchors=anchorElement(layout,el,el.anchors.horizontal,el.anchors.vertical);});}
       const byId = new Map(final.map((el) => [el.id, el]));
       setPreview({ ...layout, elements: layout.elements.map((el) => byId.get(el.id) || el) });
     }, () => {
@@ -172,7 +213,7 @@ export default function EditorPage() {
       if (!final) { setPreview(null); return; }
       const geometry = final.map(({ id, x, y, width, height }) => ({ id, x, y, width, height }));
       setSaving(true);
-      void patchLayout((l) => { for (const patch of geometry) { const el = l.elements.find((a) => a.id === patch.id); if (el && !el.locked) Object.assign(el, patch); } }, handle ? '缩放所选元素' : '移动所选元素')
+      void patchLayout((l) => { for (const patch of geometry) { const el = l.elements.find((a) => a.id === patch.id); if (el && !el.locked) {markOverrides(el,patch);Object.assign(el,patch);if(el.anchors)el.anchors=anchorElement(l,el,el.anchors.horizontal,el.anchors.vertical);} } }, handle ? '缩放所选元素' : '移动所选元素')
         .finally(() => { setPreview(null); setSaving(false); });
     });
   };
@@ -180,8 +221,9 @@ export default function EditorPage() {
     const groups = new Map<string, string>();
     const copies = items.map((el) => {
       if (el.groupId && !groups.has(el.groupId)) groups.set(el.groupId, uid());
-      return { ...structuredClone(el), id: uid(), name: `${el.name} 副本`, x: el.x + 20, y: el.y + 20, groupId: el.groupId ? groups.get(el.groupId) : undefined };
+      return { ...structuredClone(el), id: uid(), name: `${el.name} 副本`, x: el.x + 20, y: el.y + 20, groupId: el.groupId ? groups.get(el.groupId) : undefined,instanceId:el.instanceId?(groups.get(el.groupId??el.instanceId)??uid()):undefined };
     });
+    const copyIds=new Map(items.map((el,i)=>[el.id,copies[i].id]));copies.forEach(el=>remapContainerRefs(el,copyIds));
     if (copies.length) { void patchLayout((l) => { l.elements.push(...copies); }, '复制元素'); setSelected(copies.map((e) => e.id)); }
   };
   const removeSelection = () => { const ids = selection.map((e) => e.id); void patchLayout((l) => { l.elements = l.elements.filter((e) => !ids.includes(e.id)); }, '删除所选元素'); setSelected([]); };
@@ -207,7 +249,7 @@ export default function EditorPage() {
     window.addEventListener('keydown', keydown); window.addEventListener('keyup', keyup); window.addEventListener('blur', blur);
     return () => { window.removeEventListener('keydown', keydown); window.removeEventListener('keyup', keyup); window.removeEventListener('blur', blur); };
   }, [layout, selected, saving, undo, redo, deck?.id]);
-  const fit = () => { if (layout && wrapRef.current) setZoom(fitZoom(layout.width, layout.height, wrapRef.current.clientWidth, wrapRef.current.clientHeight)); };
+  const fit = () => { if (layout && wrapRef.current) {setZoom(fitZoom(layout.width, layout.height, wrapRef.current.clientWidth, wrapRef.current.clientHeight));setTimeout(()=>{const wrap=wrapRef.current,stage=stageRef.current;if(wrap&&stage){wrap.scrollLeft=stage.offsetLeft+stage.offsetWidth/2-wrap.clientWidth/2;wrap.scrollTop=stage.offsetTop+stage.offsetHeight/2-wrap.clientHeight/2;}},0);} };
   useEffect(() => {
     const wrap = wrapRef.current;
     const wheel = (event: WheelEvent) => {
@@ -216,13 +258,16 @@ export default function EditorPage() {
     wrap?.addEventListener('wheel', wheel, { passive: false });
     return () => wrap?.removeEventListener('wheel', wheel);
   }, [deck?.id]);
-  const addElement = (kind: ElementKind) => {
+  const addElement = (kind: ElementKind, shape?: string, properties?: Partial<LayoutElement>) => {
     const el: LayoutElement = { id: uid(), kind, name: KIND_LABEL[kind], x: 60, y: 60, width: 240, height: 120, rotation: 0, fill: ['text', 'icon'].includes(kind) ? 'transparent' : '#e5e7eb', color: '#111827' };
     if (kind === 'text') Object.assign(el, { text: '文本内容', fontSize: 32, fontFamily: String(content.settings?.defaultFont || 'sans'), wrapMode: 'word', horizontalAlign: 'center', verticalAlign: 'middle' });
     // 没图时也要是块看得见、能拖能选的区域（渲染层会画占位框）
-    if (kind === 'image') Object.assign(el, { width: 240, height: 240, imageFit: 'cover', assetId: assets.find((a) => a.kind === 'image')?.id });
+    if (kind === 'image') Object.assign(el, { width: 240, height: 240, imageFit: 'cover', fill:'transparent' });
     if (kind === 'icon') Object.assign(el, { iconId: 'delapouite/sword-altar', width: 96, height: 96 });
     if (kind === 'line') Object.assign(el, { height: 4, fill: '#111827', borderWidth: 2 });
+    if (kind === 'path') Object.assign(el, {shapePath:'M10 5 L90 5 L90 48 Q90 78 50 98 Q10 78 10 48 Z',borderColor:'#111827',borderWidth:2});
+    if(shape)Object.assign(el,shapeProperties(shape));
+    if(properties)Object.assign(el,properties);
     void patchLayout((l) => { l.elements.push(el); }, '新增元素'); setSelected([el.id]);
   };
 
@@ -258,35 +303,37 @@ export default function EditorPage() {
     setChecking(true); const result: typeof issues = [];
     const context = document.createElement('canvas').getContext('2d')!;
     try { for (let i = 0; i < Math.max(1, cards.length); i++) {
-      const diagnostics: { elementId: string; message: string }[] = [];
-      renderLayout(context, layout, cards[i] || null, { values: cards[i]?.values || {}, images, icons, scale: 1, diagnostics }, deck?.fields || []);
-      result.push(...diagnostics.map((d) => ({ ...d, cardIndex: i })));
+      const diagnostics=checkDesignCard(content,deck,side,i,images,icons);
+      result.push(...diagnostics.map(d=>({elementId:d.elementId,message:d.message,cardIndex:i})));
       if (i % 25 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
     }
     setIssues(result); toast(result.length ? `发现 ${result.length} 项版式问题` : '检查通过：未发现文字溢出或元素越界', result.length ? 'info' : 'ok'); }
     finally { setChecking(false); }
   };
   if (!deck) return <Empty icon="🎴" text="请先创建牌组" />;
+  const inlineElement=layout?.elements.find(e=>e.id===inlineField?.element);
+  const inlineSources=inlineElement?boundFieldIds(inlineElement,deck).map(id=>deck.fields.find(f=>f.id===id)!).filter(Boolean):[];
+  const editingField=inlineSources.find(f=>f.id===inlineField?.field);
+  const finishInline=async()=>{if(await flushCards())setInlineField(null);};
   const actualCrop = cropId ? { ...layout?.elements.find((el) => el.id === cropId), ...cardForRender?.layoutOverrides?.[cropId], ...cropDraft } : null;
   const align = (mode: Alignment) => { if (layout) void patchMany(aligned(selection, mode, selectionUnitCount(selection) === 1 ? { x: 0, y: 0, width: layout.width, height: layout.height } : undefined), '对齐元素'); };
   return <div className="editor">
     <div className="pane">
-      <div className="ph"><span style={{ flex: 1 }}>图层</span><select className="select" style={{ width: 92 }} value={side} onChange={(e) => setSide(e.currentTarget.value as 'front' | 'back')}><option value="front">正面</option><option value="back">背面</option></select></div>
-      <div className="row wrap" style={{ padding: 8, gap: 6 }}>{(Object.keys(KIND_LABEL) as ElementKind[]).map((kind) => <button className="btn sm" key={kind} onClick={() => addElement(kind)}>{KIND_ICON[kind]} {KIND_LABEL[kind]}</button>)}</div>
-      <div className="pb">{(layout?.elements || []).slice().reverse().map((el) => <div key={el.id} className={`layer ${selected.includes(el.id) ? 'sel' : ''}`} onClick={(e) => {
-        if (el.locked) { setSelected([]); return; }
-        const ids = e.altKey ? [el.id] : selectionIds(layout!.elements, [el.id]);
-        setSelected(e.shiftKey ? selected.includes(el.id) ? selected.filter((id) => !ids.includes(id)) : [...new Set([...selected, ...ids])] : ids); setCropId(null);
-      }}><span>{el.groupId ? '▣' : KIND_ICON[el.kind]}</span><span className="nm">{el.name}</span>
-        <button className="iconbtn" onClick={(e) => { e.stopPropagation(); void patchElement(el.id, { hidden: !el.hidden }); }}>{el.hidden ? '🚫' : '👁'}</button>
-        <button className="iconbtn" onClick={(e) => { e.stopPropagation(); void patchElement(el.id, { locked: !el.locked }); }}>{el.locked ? '🔒' : '🔓'}</button>
-      </div>)}</div>
+      <div className="ph"><span style={{ flex: 1 }}>图层</span><select className="select" style={{ width: 92 }} value={side} onChange={(e) => void changeSide(e.currentTarget.value as 'front' | 'back')}><option value="front">正面</option><option value="back">背面</option></select></div>
+      <div className="row wrap" style={{ padding: 8, gap: 6 }}>{(['text','image','icon'] as ElementKind[]).map((kind) => <button className="btn sm" key={kind} onClick={() => addElement(kind)}>{KIND_ICON[kind]} {KIND_LABEL[kind]}</button>)}
+        <details><summary className="btn sm">▱ 形状／矢量</summary><div style={{padding:8}}>
+          <div className="small faint">基础形状</div><div className="row wrap" style={{gap:6}}>{SHAPES.filter(s=>!('path' in s)).map(s=><button className="btn sm" key={s.id} onClick={()=>addElement('rectangle',s.id)}>{s.name}</button>)}</div>
+          <div className="small faint mt8">轮廓预设</div><div className="row wrap" style={{gap:6}}>{SHAPES.filter(s=>'path' in s).map(s=><button className="btn sm" key={s.id} onClick={()=>addElement('path',undefined,{...shapeProperties(s.id),kind:'path'})}>{s.name}</button>)}</div>
+          <label className="btn sm mt8">导入 SVG<input type="file" accept=".svg,image/svg+xml" style={{display:'none'}} onChange={e=>{const file=e.target.files?.[0];e.target.value='';if(file)void importVectorSvg(file).then(p=>addElement('path',undefined,p)).catch(err=>window.alert((err as Error).message));}}/></label>
+        </div></details>
+      </div>
+      <LayerPanel key={`${deck.id}:${side}`} elements={layout?.elements??[]} selected={selected} onSelect={ids=>{setSelected(ids);setCropId(null);}} onCommand={command=>{void patchLayout(l=>{l.elements=applyLayers(l.elements,{...command,groupId:command.operation==='group'?uid():undefined});},'图层：'+command.operation);}} />
       <div className="small faint" style={{ padding: 8 }}>Shift 多选 · 空白处框选 · Alt 点选组内元素 · 空格拖动画布</div>
     </div>
     <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div className="row wrap" style={{ padding: 8, gap: 6, borderBottom: '1px solid var(--border)' }}>
-        <select className="select" style={{ width: 170 }} value={deck.id} onChange={(e) => setDeckId(e.currentTarget.value)}>{decks.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select>
-        <button className="btn sm" onClick={() => setShowPreset(true)}>尺寸</button>
+        <select className="select" style={{ width: 170 }} value={deck.id} onChange={(e) => void changeDeck(e.currentTarget.value)}>{decks.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select>
+        <button className="btn sm" onClick={() => setShowPreset(true)}>尺寸</button><button className="btn sm" onClick={()=>setShowTemplates(true)}>模板库</button><button className="btn sm" disabled={!layout} onClick={()=>setShowDesign(true)}>设计系统</button><button className="btn sm" disabled={!layout} onClick={()=>{if(!comparison&&layout){setComparison(structuredClone(layout));toast('已记录对比基线，修改后再次点击查看','info');}else setShowComparison(true);}}>{comparison?'查看前后对比':'记录对比基线'}</button><label className="small"><input type="checkbox" checked={showGrid} onChange={e=>setShowGrid(e.target.checked)}/>网格</label>{showGrid&&<input className="input" aria-label="网格间距 px" type="number" min={1} max={500} value={gridSize} style={{width:70}} onChange={e=>setGridSize(Math.max(1,Math.min(500,Number(e.target.value)||1)))}/>}
         <button className="btn sm" disabled={!canUndo} onClick={() => void undo()}>↶</button><button className="btn sm" disabled={!canRedo} onClick={() => void redo()}>↷</button>
         <button className="btn sm" onClick={() => setZoom((z) => clamp(z - 0.1, 0.05, 3))}>−</button><span className="small">{Math.round(zoom * 100)}%</span><button className="btn sm" onClick={() => setZoom((z) => clamp(z + 0.1, 0.05, 3))}>+</button><button className="btn sm" onClick={fit}>适应</button>
         <label className="small"><input type="checkbox" checked={snap} onChange={(e) => setSnap(e.currentTarget.checked)} />吸附</label>
@@ -294,10 +341,10 @@ export default function EditorPage() {
         <button className="btn sm" disabled={!ready} onClick={() => setGallery(true)}>多卡预览</button><button className="btn sm" disabled={!ready || checking} onClick={() => void check()}>{checking ? '检查中…' : '检查全套'}</button>
       </div>
       <div className="row wrap" style={{ padding: 6, gap: 4 }}>
-        <button className="btn sm" disabled={!cards.length} onClick={() => { setSampleIdx((i) => Math.max(0, i - 1)); setCropDraft(null); }}>‹</button>
-        <span className="small">{String(sampleCard?.values.name || `${sampleIdx + 1}/${cards.length}`)}</span>
-        <button className="btn sm" disabled={!cards.length} onClick={() => { setSampleIdx((i) => Math.min(cards.length - 1, i + 1)); setCropDraft(null); }}>›</button>
-        <span className="small faint">{saving ? '正在提交…' : selection.length ? `已选 ${selection.length} 个元素` : '拖动只在松手时保存一次'}</span>
+        <button className="btn sm" disabled={!cards.length} onClick={()=>void selectCard(sampleIdx-1)}>‹</button>
+        <select className="select" aria-label="当前编辑卡牌" style={{width:180}} value={sampleCard?.id??''} onChange={e=>void selectCard(cards.findIndex(c=>c.id===e.target.value))}><option value="" disabled>选择卡牌…</option>{cards.map((card,i)=><option key={card.id} value={card.id}>{i+1}. {String(card.values.name||'未命名')}</option>)}</select><button className="btn sm" onClick={()=>void newCard()}>新建卡牌</button><span className="small faint">双击绑定文字可编辑当前卡牌</span>
+        <button className="btn sm" disabled={!cards.length} onClick={()=>void selectCard(sampleIdx+1)}>›</button>
+        <span className="small faint">{saving ? '正在提交…' : selection.length ? `已选 ${selection.length} 个元素` : '牌外区域可暂存、组合图层；空格或中键拖动视图'}</span>
         {selection.length > 0 && <><select className="select" style={{ width: 100 }} value="" onChange={(e) => { if (e.currentTarget.value) align(e.currentTarget.value as Alignment); }}><option value="">对齐…</option>{[['left','左'],['center','水平居中'],['right','右'],['top','上'],['middle','垂直居中'],['bottom','下']].map(([k,n]) => <option key={k} value={k}>{n}</option>)}</select>
           <button className="btn sm" disabled={selectionUnitCount(selection) < 3} onClick={() => void patchMany(distributed(selection, 'x'), '水平分布')}>水平分布</button><button className="btn sm" disabled={selectionUnitCount(selection) < 3} onClick={() => void patchMany(distributed(selection, 'y'), '垂直分布')}>垂直分布</button>
           <button className="btn sm" onClick={() => duplicate()}>复制</button>
@@ -313,38 +360,73 @@ export default function EditorPage() {
         listen((event) => { wrap.scrollLeft = left - (event.clientX - x); wrap.scrollTop = top - (event.clientY - y); }, () => {});
       }}>
         {!layout ? <Empty icon="✏️" text="这一面还没有版式" action={<button className="btn primary" onClick={() => void patchLayout(() => {})}>创建版式</button>} /> :
-          <div
+          <div style={{padding:600*zoom,width:'max-content',minWidth:'100%',boxSizing:'border-box'}}><div
             ref={stageRef} className="canvas-stage" tabIndex={0} aria-label="卡牌版式画布"
             style={{ width: layout.width * zoom, height: layout.height * zoom }}
             onMouseDown={(e) => startGesture(e)}
-            onDoubleClick={(e) => { const p = point(e); const el = [...layout.elements].reverse().find((el) => el.kind === 'image' && !el.locked && hitElement(el, p.x, p.y)); if (el) { setSelected([el.id]); setCropId(el.id); } }}
+            onDoubleClick={e=>{const p=point(e);const el=[...layout.elements].reverse().find(el=>!el.hidden&&evaluate(el.displayCondition,sampleCard?.values??{})&&hitElement(el,p.x,p.y));if(!el)return;
+              const fields=boundFieldIds(el,deck);if(fields.length){if(!sampleCard){toast('先选择或新建一张卡牌，再编辑字段','info');return;}setSelected([el.id]);setCropId(null);setInlineField({element:el.id,field:fields[0]});}
+              else if(el.kind==='image'&&!el.locked){setSelected([el.id]);setCropId(el.id);}else toast('此元素未绑定字段，可在右侧编辑共享版式属性','info');}}
+
             onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
             onDrop={(e) => { void dropImages(e); }}
           >
-            <canvas ref={canvasRef} style={{ width: layout.width * zoom, height: layout.height * zoom }} />
+            <canvas ref={canvasRef} style={{position:"absolute",left:-600*zoom,top:-600*zoom,width:(layout.width+1200)*zoom,height:(layout.height+1200)*zoom}} /><div style={{position:"absolute",inset:0,pointerEvents:"none",border:"1px solid #94a3b8"}}/>
             {showSafe && <div style={{ pointerEvents: 'none', position: 'absolute', inset: `${3 * (layout.width / (layout.widthMm || 63.5)) * zoom}px`, border: '1px dashed #16a34a' }} title="3mm 安全区" />}
+            {showGrid&&<div style={{position:'absolute',inset:0,pointerEvents:'none',backgroundImage:'linear-gradient(to right,#3b82f630 1px,transparent 1px),linear-gradient(to bottom,#3b82f630 1px,transparent 1px)',backgroundSize:`${gridSize*zoom}px ${gridSize*zoom}px`}}/>}
+            {(layout.guides??[]).map((g,i)=><div key={`ref-${i}`} style={{position:'absolute',pointerEvents:'none',background:'#06b6d4',...(g.axis==='x'?{left:g.value*zoom,top:0,width:1,height:'100%'}:{top:g.value*zoom,left:0,height:1,width:'100%'})}}/>)}
             {guides.map((g) => <div key={g.axis} style={{ position: 'absolute', pointerEvents: 'none', background: '#f43f5e', ...(g.axis === 'x' ? { left: g.value * zoom, top: 0, width: 1, height: '100%' } : { top: g.value * zoom, left: 0, height: 1, width: '100%' }) }} />)}
             {marquee && <div style={{ position: 'absolute', pointerEvents: 'none', left: marquee.x * zoom, top: marquee.y * zoom, width: marquee.width * zoom, height: marquee.height * zoom, background: '#3b82f633', border: '1px solid #3b82f6' }} />}
             {box && <div className="sel" style={{ left: box.x * zoom, top: box.y * zoom, width: box.width * zoom, height: box.height * zoom, transform: sel?.rotation ? `rotate(${sel.rotation}deg)` : undefined }}><span className="lbl">{sel?.name || `${selection.length} 个元素`}</span>{!cropId && ['tl','tr','bl','br'].map((h) => <div key={h} className={`h ${h}`} onMouseDown={(e) => { e.stopPropagation(); startGesture(e, h); }} />)}</div>}
-          </div>}
+            {inlineElement&&editingField&&sampleCard&&<div role="dialog" aria-label="编辑当前卡牌字段" style={{position:'absolute',zIndex:8,left:Math.max(8,Math.min(inlineElement.x*zoom,layout.width*zoom-350)),top:Math.max(8,Math.min((inlineElement.y+inlineElement.height)*zoom+8,layout.height*zoom-260)),width:340,maxHeight:420,overflowY:'auto',padding:12,background:'var(--panel)',border:'1px solid var(--accent)',borderRadius:10,boxShadow:'var(--shadow-lg)'}} onMouseDown={e=>e.stopPropagation()} onDoubleClick={e=>e.stopPropagation()} onKeyDown={e=>{if(!e.nativeEvent.isComposing&&(e.key==='Escape'||((e.ctrlKey||e.metaKey)&&e.key==='Enter'))){e.preventDefault();e.stopPropagation();void finishInline();}}}>
+              <b className="small">编辑当前卡牌：{String(sampleCard.values.name||'未命名')}</b><div className="small faint mt8">仅修改此卡数据，共享版式不变</div>
+              {inlineSources.length>1?<select className="select mt8" aria-label="选择绑定字段" value={editingField.id} onChange={e=>{const field=e.target.value;void flushCards().then(ok=>{if(ok)setInlineField({element:inlineElement.id,field});});}}>{inlineSources.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select>:<div className="small mt8">{editingField.name} · {editingField.type}</div>}
+              <div className="mt8"><CardFieldInput key={`${sampleCard.id}:${editingField.id}`} field={editingField} value={sampleCard.values[editingField.id]} rich={!!inlineElement.richText} autoFocus onChange={value=>drafts.edit(activeCardKey,editingField.id,value)} onPause={on=>drafts.pause(activeCardKey,editingField.id,on)} onBlur={()=>void drafts.flush(activeCardKey)}/></div>
+              <div className="small faint mt8" role="status">{({saved:'已保存',pending:'待保存…',saving:'正在保存…',composing:'中文输入中…',error:'保存失败，草稿保留'})[drafts.status(activeCardKey)]}</div>
+              {drafts.error(activeCardKey)&&<div role="alert" className="small danger">{drafts.error(activeCardKey)}</div>}
+              <div className="row mt8" style={{gap:6}}><button className="btn primary sm" onClick={()=>void finishInline()}>保存并完成</button>{editingField.type==='image'&&inlineElement.kind==='image'&&<button className="btn sm" onClick={()=>{void flushCards().then(ok=>{if(ok){setInlineField(null);setCropPerCard(true);setCropId(inlineElement.id);}});}}>调整此卡裁切</button>}</div>
+            </div>}
+
+          </div></div>}
       </div>
-      {!!issues.length && <div style={{ maxHeight: 150, overflow: 'auto', padding: 8 }}>{issues.slice(0, 500).map((issue, i) => <button className="btn sm" key={i} onClick={() => { setSampleIdx(issue.cardIndex); setSelected([issue.elementId]); }}>{String(cards[issue.cardIndex]?.values.name || issue.cardIndex + 1)} · {layout?.elements.find((el) => el.id === issue.elementId)?.name}: {issue.message}</button>)}{issues.length > 500 && <span>仅显示前 500 项，共 {issues.length} 项</span>}</div>}
+      {!!issues.length && <div style={{ maxHeight: 150, overflow: 'auto', padding: 8 }}>{issues.slice(0, 500).map((issue, i) => <button className="btn sm" key={i} onClick={()=>{void selectCard(issue.cardIndex).then(()=>setSelected([issue.elementId]));}}>{String(cards[issue.cardIndex]?.values.name || issue.cardIndex + 1)} · {layout?.elements.find((el) => el.id === issue.elementId)?.name}: {issue.message}</button>)}{issues.length > 500 && <span>仅显示前 500 项，共 {issues.length} 项</span>}</div>}
     </div>
     <div className="pane right"><div className="ph">属性</div><div className="pb">
+      <CardFieldEditor deck={deck} card={sampleCard} layout={layout} drafts={drafts} onNewCard={()=>void newCard()} highlight={inlineField?.field??sel?.fieldId} onEnableRich={(field,on)=>void patchLayout(l=>{for(const e of l.elements)if(e.kind==='text'&&e.fieldId===field){markOverrides(e,{richText:on});e.richText=on;}},'调整字段富文本显示')}/>
+      <div className="small faint" style={{padding:12}}>共享版式属性：影响本牌组所有卡牌</div>
+
       {selection.length > 1 ? <Section title="批量操作"><Row label="字体"><select className="select" value="" onChange={(e) => { const fontFamily = e.currentTarget.value; void patchMany(selection.map((el) => el.kind === 'text' ? { ...el, fontFamily } : el), '批量设定字体'); }}><option value="">选择字体…</option>{fontOptions.map((f) => <option key={f.key} value={f.key}>{f.name}</option>)}</select></Row><button className="btn danger" onClick={removeSelection}>删除所选元素</button></Section> : sel ?
         <><ElementProps key={sel.id} el={sel} deck={deck} assets={assets} onPatch={(patch) => void patchElement(sel.id, patch)} onDelete={async () => { if (await ask({ title: '删除元素', text: `删除「${sel.name}」？`, danger: true })) removeSelection(); }} onReorder={(dir) => void patchLayout((l) => { const i = l.elements.findIndex((e) => e.id === sel.id); l.elements = move(l.elements, i, clamp(i + dir, 0, l.elements.length - 1)); }, '调整层级')} />
         {sel.kind === 'image' && <div style={{ padding: 12 }}><button className="btn" onClick={() => setCropId(sel.id)}>编辑图片裁切 / 焦点</button>{sampleCard?.layoutOverrides?.[sel.id] && <button className="btn sm ghost" onClick={() => void update((c) => { const card = c.decks.find((d) => d.id === deck.id)?.cards.find((a) => a.id === sampleCard.id); if (card?.layoutOverrides) delete card.layoutOverrides[sel.id]; }, '清除单卡裁切')}>此卡重新跟随模板裁切</button>}</div>}</> : layout ? <LayoutProps layout={layout} assets={assets} onPatch={(patch) => void patchLayout((l) => Object.assign(l, patch))} /> : null}
     </div></div>
+    {showDesign&&layout&&<DesignPanel content={content} layout={layout} selected={selected} onClose={()=>setShowDesign(false)} onCommand={async(operation,args)=>{
+      let result:unknown;await update(c=>{result=designCommand(c,deck.id,side,operation,args,uid);},'设计系统：'+operation);return result;
+    }} onPatch={async(ids,patch)=>{validateDesignPatch(patch);await patchLayout(l=>{for(const e of l.elements)if(ids.includes(e.id)&&!e.locked){markOverrides(e,patch);Object.assign(e,patch);if(e.anchors&&['x','y','width','height'].some(k=>k in patch))e.anchors=anchorElement(l,e,e.anchors.horizontal,e.anchors.vertical);}},'精细设计属性');}}/>}
+    {showComparison&&comparison&&layout&&<Modal wide title="修改前后对比（使用当前卡牌数据）" onClose={()=>setShowComparison(false)}><div className="grid2"><div>修改前<CardThumbnail layout={comparison} card={sampleCard} fields={deck.fields} images={images} icons={icons}/></div><div>修改后<CardThumbnail layout={layout} card={sampleCard} fields={deck.fields} images={images} icons={icons}/></div></div><button className="btn mt8" onClick={()=>{setComparison(structuredClone(layout));setShowComparison(false);}}>以当前版式更新基线</button></Modal>}
+    {showTemplates&&<TemplateLibrary content={content} deck={deck} onClose={()=>setShowTemplates(false)} onApply={async(template,options,isNew,name)=>{
+      if(!isNew&&!await ask({title:'应用版式模板',text:`替换「${deck.name}」的${options.side==='front'?'正面':options.side==='back'?'背面':'正反面'}版式？现有卡牌与字段保留，可撤销恢复。`,danger:true}))return;
+      if(!await flushCards())throw new Error('请先保存当前卡牌草稿');
+      let newId='';
+      await update(c=>{
+        const current=c.decks.find(d=>d.id===deck.id);if(!current)throw new Error('牌组已不存在');
+        const base=isNew?{id:uid(),name,fields:[{id:'name',name:'名称',type:'text' as const},{id:'count',name:'数量',type:'number' as const}],cards:[],frontLayout:null,backLayout:null,useSharedBack:true}:current;
+        const generated=instantiateTemplate(template,base,options,uid).deck;
+        if(isNew){c.decks.push(generated);newId=generated.id;}else Object.assign(current,generated);
+      },isNew?'模板新建牌组':'应用版式模板');
+      if(newId)setDeckId(newId);setSelected([]);setShowTemplates(false);toast('模板已应用，所有图层可继续编辑','ok');
+    }} onSave={async name=>{
+      await update(c=>{const current=c.decks.find(d=>d.id===deck.id);if(!current)throw new Error('牌组已不存在');const template=captureTemplate(c,current,name,uid);(c.settings??={}).cardTemplates=[...allCardTemplates(c).filter(t=>t.custom),template];},'保存项目模板');toast('已保存项目模板，Agent 也可查询使用','ok');
+    }}/>}
     {showPreset && <Modal title="卡牌尺寸" onClose={() => setShowPreset(false)}><div className="grid2">{CARD_PRESETS.map((p) => <button key={p.key} className="btn" onClick={() => { void patchLayout((l) => Object.assign(l, { width: p.width, height: p.height, widthMm: p.widthMm, heightMm: p.heightMm }), '修改尺寸'); setShowPreset(false); }}>{p.name} {p.width}×{p.height}</button>)}</div>
       <NumberInput value={layout?.width || 750} onChange={(width) => void patchLayout((l) => { l.width = width; })} /><NumberInput value={layout?.height || 1050} onChange={(height) => void patchLayout((l) => { l.height = height; })} /></Modal>}
-    {gallery && layout && <Modal title="多卡同步预览" wide onClose={() => setGallery(false)}><div className="row"><button className="btn sm" disabled={!galleryPage} onClick={() => setGalleryPage((p) => p - 1)}>上一页</button><span>{galleryPage + 1} / {Math.max(1, Math.ceil(cards.length / 12))}</span><button className="btn sm" disabled={(galleryPage + 1) * 12 >= cards.length} onClick={() => setGalleryPage((p) => p + 1)}>下一页</button><button className="btn sm" onClick={() => { const longest = cards.map((c, i) => ({ i, length: layout.elements.filter((e) => e.kind === 'text').reduce((n, e) => n + String(e.fieldId ? c.values[e.fieldId] || '' : e.text || '').length, 0) })).sort((a,b) => b.length-a.length)[0]; if (longest) { setSampleIdx(longest.i); setGalleryPage(Math.floor(longest.i / 12)); } }}>定位最长文本卡</button></div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12, marginTop: 12 }}>{cards.slice(galleryPage * 12, galleryPage * 12 + 12).map((card, i) => <button className="btn" key={card.id} style={{ display: 'block', padding: 6 }} onClick={() => { setSampleIdx(galleryPage * 12 + i); setGallery(false); }}><CardThumbnail layout={layout} card={card} images={images} icons={icons} fields={deck.fields} /><div className="small">{String(card.values.name || galleryPage * 12 + i + 1)}</div></button>)}</div></Modal>}
+    {gallery && layout && <Modal title="多卡同步预览" wide onClose={() => setGallery(false)}><div className="row"><button className="btn sm" disabled={!galleryPage} onClick={() => setGalleryPage((p) => p - 1)}>上一页</button><span>{galleryPage + 1} / {Math.max(1, Math.ceil(cards.length / 12))}</span><button className="btn sm" disabled={(galleryPage + 1) * 12 >= cards.length} onClick={() => setGalleryPage((p) => p + 1)}>下一页</button><button className="btn sm" onClick={() => { const longest = cards.map((c, i) => ({ i, length: layout.elements.filter((e) => e.kind === 'text').reduce((n, e) => n + String(e.fieldId ? c.values[e.fieldId] || '' : e.text || '').length, 0) })).sort((a,b) => b.length-a.length)[0]; if(longest){void selectCard(longest.i).then(()=>setGalleryPage(Math.floor(longest.i/12)));} }}>定位最长文本卡</button></div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12, marginTop: 12 }}>{cards.slice(galleryPage * 12, galleryPage * 12 + 12).map((card, i) => <button className="btn" key={card.id} style={{ display: 'block', padding: 6 }} onClick={()=>{void selectCard(galleryPage*12+i).then(()=>setGallery(false));}}><CardThumbnail layout={layout} card={card} images={images} icons={icons} fields={deck.fields} /><div className="small">{String(card.values.name || galleryPage * 12 + i + 1)}</div></button>)}</div></Modal>}
     {confirmNode}
   </div>;
 }
 function CardThumbnail({ layout, card, fields, images, icons }: { layout: Layout; card: Card; fields: Field[]; images: Record<string, ImageLike>; icons: Record<string, ImageLike> }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => { const cv = renderToCanvas(layout, card, { values: card.values, images, icons, scale: 180 / layout.width, placeholders: true }, fields); const target = ref.current; if (target) { target.width = cv.width; target.height = cv.height; target.getContext('2d')?.drawImage(cv, 0, 0); } }, [layout, card, images, icons, fields]);
+  useEffect(() => { const cv = renderToCanvas(layout, card, { values: card.values, images, icons, scale: 600 / layout.width, placeholders: true }, fields); const target = ref.current; if (target) { target.width = cv.width; target.height = cv.height; target.getContext('2d')?.drawImage(cv, 0, 0); } }, [layout, card, images, icons, fields]);
   return <canvas ref={ref} style={{ width: '100%', height: 'auto' }} />;
 }
 
@@ -441,7 +523,7 @@ function ElementProps({
           </Row>
           {!el.fieldId && (
             <Row label="内容">
-              <textarea className="input" rows={3} value={el.text ?? ''} onChange={(e) => onPatch({ text: e.target.value })} />
+              <RichTextEditor value={el.text??''} rich={!!el.richText} onChange={text=>onPatch({text})}/>
             </Row>
           )}
           <Row label="富文本"><input type="checkbox" checked={!!el.richText} onChange={(e) => onPatch({ richText: e.currentTarget.checked })} /></Row>
@@ -453,6 +535,9 @@ function ElementProps({
               <select className="select" value="" onChange={(e) => onPatch({ text: (el.text || '') + `[image:${e.currentTarget.value}]` })}><option value="">插入项目图片…</option>{imgAssets.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select>
             </div>}
           </div>}
+          <Row label="文字方向"><select className="select" aria-label="文字方向" value={el.writingMode??'horizontal'} onChange={e=>onPatch({writingMode:e.target.value as LayoutElement['writingMode']})}><option value="horizontal">横排</option><option value="vertical-rl">竖排 · 从右向左</option><option value="vertical-lr">竖排 · 从左向右</option></select></Row>
+          <Row label="文字描边色"><ColorInput value={el.borderColor??'#ffffff'} onChange={v=>onPatch({borderColor:v})}/></Row>
+          <Row label="文字描边宽"><NumberInput value={el.borderWidth??0} min={0} onChange={v=>onPatch({borderWidth:v})}/></Row>
           <Row label="字号"><NumberInput value={el.fontSize ?? 24} min={1} onChange={(v) => onPatch({ fontSize: v })} /></Row>
           <Row label="自动缩放">
             <input type="checkbox" checked={!!el.autoFit} onChange={(e) => onPatch({ autoFit: e.target.checked })} />
@@ -582,8 +667,11 @@ function ElementProps({
         </Section>
       )}
 
-      {(el.kind === 'rectangle' || el.kind === 'ellipse' || el.kind === 'line') && (
-        <Section title="形状">
+      {el.kind === 'path' && <Section title="形状／矢量 · 轮廓"><VectorPathEditor element={el} onPatch={onPatch}/></Section>}
+      {(el.kind === 'rectangle' || el.kind === 'ellipse' || el.kind === 'line' || el.kind === 'path') && (
+        <Section title="形状／矢量 · 外观">
+          <Row label="纹理素材"><select className="select" aria-label="纹理素材" value={el.textureAssetId??''} onChange={e=>onPatch({textureAssetId:e.target.value||undefined})}><option value="">无纹理</option>{assets.filter(a=>a.kind==='image').map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></Row>
+          {el.textureAssetId&&<><Row label="纹理方式"><select className="select" value={el.textureMode??'cover'} onChange={e=>onPatch({textureMode:e.target.value as 'cover'|'repeat'})}><option value="cover">铺满</option><option value="repeat">平铺</option></select></Row><Row label="纹理缩放"><NumberInput value={el.textureScale??1} min={0.01} step={0.1} onChange={v=>onPatch({textureScale:v})}/></Row></>}
           <Row label="填充"><ColorInput value={el.fill} onChange={(v) => onPatch({ fill: v })} /></Row>
           <Row label="填充透明">
             <NumberInput value={el.fillOpacity ?? 1} step={0.05} min={0} max={1} onChange={(v) => onPatch({ fillOpacity: v })} />
@@ -619,6 +707,12 @@ function ElementProps({
         </Row>
         {el.countFieldId && (
           <>
+            <Row label="总格数字段"><select className="select" aria-label="总格数字段" value={el.countSlotsFieldId??''} onChange={e=>onPatch({countSlotsFieldId:e.target.value||undefined})}><option value="">使用固定格数</option>{textFields.filter(f=>f.type==='number').map(f=><option key={f.id} value={f.id}>{f.name}</option>)}</select></Row>
+            <div className="small faint">绑定后按每张卡的总格数显示；0 或无效值不显示格子。总格数优先于固定设置。</div>
+            <Row label="固定总格数"><NumberInput value={el.countSlots??0} min={0} max={100} onChange={v=>onPatch({countSlots:v>0?Math.floor(v):undefined})}/></Row>
+            <div className="small faint">0 表示只画已有数量；固定格数会同时显示空格。</div>
+            <Row label="允许半格"><input type="checkbox" checked={!!el.countHalf} onChange={e=>onPatch({countHalf:e.target.checked})}/></Row>
+            <Row label="空格透明度"><NumberInput value={el.countEmptyOpacity??0.2} min={0} max={1} step={0.05} onChange={v=>onPatch({countEmptyOpacity:v})}/></Row>
             <Row label="上限"><NumberInput value={el.countMax ?? 10} min={1} onChange={(v) => onPatch({ countMax: v })} /></Row>
             <Row label="间距"><NumberInput value={el.countSpacing ?? 0} onChange={(v) => onPatch({ countSpacing: v })} /></Row>
             <Row label="方向">

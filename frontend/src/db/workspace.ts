@@ -58,6 +58,7 @@ export function isWorkspaceSupported(): boolean {
 /* ---------------- 状态 ---------------- */
 
 export interface WorkspaceInfo {
+  mirrorPaused?: boolean;
   connected: boolean;
   name: string;
   /** 已写盘的文件数（最近一次镜像） */
@@ -67,6 +68,8 @@ export interface WorkspaceInfo {
 }
 
 let handle: FSDirHandle | null = null;
+let restoring=false;
+let mirrorEnabled=true;
 let info: WorkspaceInfo = { connected: false, name: '', files: 0 };
 const listeners = new Set<(i: WorkspaceInfo) => void>();
 
@@ -109,7 +112,11 @@ async function writeFile(dir: FSDirHandle, name: string, data: string | Blob): P
 
 async function readText(dir: FSDirHandle, name: string): Promise<string | null> {
   try {
-    const fh = await dir.getFileHandle(name);
+    const parts=name.split('/');
+    if(parts.some(p=>!p||p==='.'||p==='..'||p.includes('\\')||p.includes(':')))return null;
+    const file=parts.pop()!;
+    for(const part of parts)dir=await dir.getDirectoryHandle(part);
+    const fh = await dir.getFileHandle(file);
     return await (await fh.getFile()).text();
   } catch {
     return null;
@@ -190,10 +197,13 @@ export async function connectWorkspace(): Promise<WorkspaceInfo> {
   if (perm !== 'granted') throw new Error('未获得该文件夹的读写权限');
 
   handle = picked;
+  mirrorEnabled=false;
   await setSetting(HANDLE_KEY, picked);
-  setInfo({ connected: true, name: picked.name, files: 0 });
-  const r = await mirrorAll();
-  setInfo({ files: r.files, lastSyncAt: new Date().toISOString() });
+  setInfo({ connected: true, name: picked.name, files: 0, mirrorPaused:true });
+  // 连接现有目录先恢复，不得先用新浏览器的空库覆盖磁盘索引。
+  restoring=true;
+  try{await importFromWorkspace();}finally{restoring=false;}
+  // 首次连接不自动写盘，用户核对恢复结果后再落盘。
   return info;
 }
 
@@ -433,6 +443,9 @@ export async function mirrorProject(projectId: string): Promise<MirrorResult> {
 
 /** 全量镜像所有项目并写索引清单 */
 export async function mirrorAll(): Promise<MirrorResult> {
+  if(restoring)throw new Error('正在恢复工作区，请稍后再写盘');
+  mirrorEnabled=true;
+  setInfo({mirrorPaused:false});
   const root = handle;
   if (!root) throw new Error('未连接工作区');
 
@@ -493,7 +506,7 @@ let pending: string | null = null;
 let timer: ReturnType<typeof setTimeout> | undefined;
 
 const runMirror = debounce(async () => {
-  if (!handle) return;
+  if (!handle||restoring||!mirrorEnabled) return;
   const id = pending;
   pending = null;
   setInfo({ writing: true });
@@ -520,8 +533,18 @@ export function scheduleMirror(projectId?: string): void {
 export async function importFromWorkspace(): Promise<{ projects: number; assets: number }> {
   const root = handle;
   if (!root) throw new Error('未连接工作区');
-  const idx = await readJSON<IndexFile>(root, INDEX_FILE);
-  if (!idx?.projects?.length) return { projects: 0, assets: 0 };
+  let idx = await readJSON<IndexFile>(root, INDEX_FILE);
+  if (!idx?.projects?.length){
+    const recovered:IndexFile['projects']=[];
+    try{const dir=await root.getDirectoryHandle('projects');for await(const name of dir.keys()){
+      if(!name.endsWith('.json'))continue;
+      const file=await readJSON<LocalProject>(dir,name);
+      if(file?.id&&file.name&&Array.isArray(file.content?.decks))recovered.push({id:file.id,name:file.name,file:`projects/${name}`,updatedAt:file.updatedAt??new Date().toISOString(),decks:file.content.decks.length,cards:file.content.decks.reduce((n,d)=>n+d.cards.length,0)});
+    }}catch{/* 目录不存在时没有项目可恢复。 */}
+    if(!recovered.length)return {projects:0,assets:0};
+    const assets=await readJSON<AssetMetaRow[]>(root,'assets/.assets.json')??[];
+    idx={app:'card_arts',version:1,updatedAt:new Date().toISOString(),projects:recovered,assets,folders:[]};
+  }
 
   let n = 0;
   for (const it of idx.projects) {

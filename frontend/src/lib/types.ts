@@ -19,7 +19,7 @@ export interface Card {
   layoutOverrides?: Record<string, Partial<LayoutElement>>;
 }
 
-export type ElementKind = 'text' | 'image' | 'icon' | 'rectangle' | 'ellipse' | 'line';
+export type ElementKind = 'text' | 'image' | 'icon' | 'rectangle' | 'ellipse' | 'line' | 'path';
 
 export type CompareOp = 'equals' | 'notEquals' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'isEmpty' | 'isNotEmpty';
 
@@ -40,9 +40,33 @@ export type AnyCondition = Condition | ConditionGroup;
 
 export type WrapMode = 'none' | 'word' | 'anywhere' | 'keepWord';
 
+export interface DesignStyle { id:string; name:string; properties:Partial<LayoutElement>; revision:number }
+export interface DesignComponent { id:string; name:string; width:number; height:number; elements:LayoutElement[]; revision:number }
+export interface LayoutFlow { id:string; ids:string[]; direction:'horizontal'|'vertical'; x:number; y:number; width:number; gap:number; padding:number; align:'start'|'center'|'end' }
+export interface ElementAnchors { horizontal:'left'|'right'|'center'|'stretch'; vertical:'top'|'bottom'|'center'|'stretch'; referenceWidth:number; referenceHeight:number; left:number; right:number; top:number; bottom:number; centerX:number; centerY:number }
 export interface LayoutElement {
+  styleId?:string; styleOverrides?:string[];
+  componentId?:string; instanceId?:string; componentElementId?:string; componentOverrides?:string[];
+  anchors?:ElementAnchors;
+  textGrowth?:{maxHeight:number; shrinkImageId?:string; minImageHeight?:number};
+  padding?:number; paragraphSpacing?:number; firstLineIndent?:number;
+  inlineIconScale?:number; inlineIconOffset?:number;
+  gradient?:{from:string;to:string;angle:number};
+  shadow?:{color:string;blur:number;x:number;y:number};
+  imageMask?:'rectangle'|'ellipse'; maskPath?:string;
+  blendMode?:'source-over'|'multiply'|'screen'|'overlay';
   id: string;
   kind: ElementKind;
+  /** 形状轮廓，坐标范围 0–100；保持原有 rectangle 类型兼容。 */
+  shapePath?: string;
+  pathViewBox?: [number, number, number, number];
+  fitContent?: { ids: string[]; padding: number };
+  stackAfter?: { id: string; gap: number };
+  writingMode?: 'horizontal' | 'vertical-rl' | 'vertical-lr';
+  clipSourceId?: string;
+  textureAssetId?: string;
+  textureMode?: 'cover' | 'repeat';
+  textureScale?: number;
   name: string;
   x: number; y: number; width: number; height: number; rotation: number;
   fill: string; color: string;
@@ -65,6 +89,7 @@ export interface LayoutElement {
   imageFocusY?: number;
   richText?: boolean;
   groupId?: string;
+  groupName?: string;
   assetId?: string;
   iconId?: string;
   /** 顶层既可以是单个条件，也可以是条件组 */
@@ -73,6 +98,10 @@ export interface LayoutElement {
   /** 数量展开：按某字段的值重复绘制（原项目核心机制之一） */
   countFieldId?: string;
   countMax?: number;
+  countSlots?: number;
+  countSlotsFieldId?: string;
+  countHalf?: boolean;
+  countEmptyOpacity?: number;
   countSpacing?: number;
   countDirection?: 'horizontal' | 'vertical';
 }
@@ -91,6 +120,8 @@ export interface Layout {
   borderRadius: number;
   backgroundAssetId?: string | null;
   elements: LayoutElement[];
+  flows?:LayoutFlow[];
+  guides?:{axis:'x'|'y';value:number}[];
 }
 
 export interface Deck {
@@ -145,6 +176,8 @@ export interface ExportSettings {
 }
 
 export interface ProjectSettings extends Record<string, unknown> {
+  designStyles?:DesignStyle[];
+  designComponents?:DesignComponent[];
   lang?: 'zh' | 'en';
   syncEnabled?: boolean;
   export?: ExportSettings;
@@ -262,6 +295,8 @@ export interface LLMProvider {
 }
 
 export interface LLMConfig {
+  /** 每次用户请求允许的模型调用轮数；默认 32，最大 96。 */
+  agentMaxRounds?: number;
   /** Actual model context capacity (input + output). Defaults to 65536 for old settings. */
   contextWindow?: number;
   contextMode?: 'auto' | 'manual';
@@ -293,6 +328,7 @@ export interface LLMConfig {
 
 export interface ChatMessage {
   agentRun?: {
+    task?: {round:number;phase:string;lastTools:string[];budget?:number;hardLimit?:number};
     messages?: import('./agentContext').AgentMessage[];
     context?: { dropped: number; estimatedTokens: number };
     status: string;

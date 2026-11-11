@@ -45,6 +45,7 @@ SYSTEM_GUIDANCE = """你是 CardArts 的桌游创作智能体。
 6. 富文本与版式编辑使用「精确搜索替换」（find/replace），
    且目标片段必须在原文中唯一，否则先读取更长的上下文。
 7. 使用用户的语言回答。
+8. 图层排序/显隐/锁定/组合使用 list_layers 与 manage_layers；传真实 ID，排序 order 为底层到顶层，建议带 expected_revision；不要编造图层 ID。
 """
 
 
@@ -96,6 +97,19 @@ def build_server() -> MCPServer:
     async def get_layout(project_id: str, deck_id: str, side: str = "front") -> str:
         async with session_scope() as s:
             return json.dumps(await repo.get_layout(s, project_id, deck_id, side), ensure_ascii=False)
+
+    @mcp.tool(name="list_layers", description="列出指定面图层，从顶层到底层，含真实 ID、组、锁定、显隐和工程 revision")
+    async def list_layers(project_id: str, deck_id: str, side: str = "front") -> str:
+        async with session_scope() as s:
+            return json.dumps(await repo.list_layers(s, project_id, deck_id, side), ensure_ascii=False)
+
+    @mcp.tool(name="manage_layers", description="管理图层：front/back/up/down/above/below/order/rename/renameGroup/show/hide/lock/unlock/group/ungroup。先 list_layers；ids 为真实 ID；order 底层到顶层；默认整组操作。锁定层先 unlock；建议传 expected_revision 防止旧状态覆盖")
+    async def manage_layers(project_id: str, deck_id: str, side: str, operation: str, ids: list[str],
+                            target: str | None = None, name: str | None = None, order: list[str] | None = None,
+                            expand_groups: bool = True, expected_revision: int | None = None) -> str:
+        async with session_scope() as s:
+            return json.dumps(await repo.manage_layers(s, project_id, deck_id, side, operation, ids,
+                target=target, name=name, order=order, expand_groups=expand_groups, expected_revision=expected_revision), ensure_ascii=False)
 
     @mcp.tool(name="list_documents", description="列出项目文档及更新时间")
     async def list_documents(project_id: str) -> str:

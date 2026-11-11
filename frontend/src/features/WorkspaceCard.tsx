@@ -21,7 +21,7 @@ export default function WorkspaceCard({ dense = false }: { dense?: boolean }) {
     setBusy(true);
     try {
       await connectWorkspace();
-      toast(`已连接文件夹「${workspace.name || '工作区'}」，项目 / 素材 / 版本已写入`, 'ok');
+      toast('已连接并尝试恢复已有项目；请核对项目列表，确认后点击“立即落盘”开启自动写回。', 'ok');
     } catch (e) {
       const msg = (e as Error).message ?? '';
       if (!/abort/i.test(msg)) toast(`连接失败：${msg}`, 'err');
@@ -104,6 +104,7 @@ export default function WorkspaceCard({ dense = false }: { dense?: boolean }) {
             <span className="mono faint">{workspace.files}</span>
           </div>
         )}
+        {workspace.connected&&workspace.mirrorPaused&&<div role="status" className="small mt8">已暂停自动写回。请先核对恢复的项目，再点击“立即落盘”开启写回；不要在旧项目未恢复前写入空索引。</div>}
 
         <div className="row mt8">
           {!workspace.connected && (
