@@ -1,56 +1,67 @@
 # CardArts
 
-本地优先（local-first）的卡牌 / 桌游设计工具，前后端分离架构。
+本地优先的卡牌与桌游设计工具，提供可视化版式编辑、卡牌数据管理、素材与字体库，以及能够直接操作工程的内置 Agent。适合制作武将牌、技能牌、道具牌和打印试玩原型。
 
-```
-card_arts/
-├── backend/           Python FastAPI 后端（同步 / 素材 / 图标库 / MCP）
-├── frontend/          React + TypeScript 前端（完整编辑器）
-├── data/              服务端数据根目录（SQLite + 对象存储 + 内置图标库）
-└── workspace/         浏览器直连的文件夹工作区（项目 / 素材 / 版本的真实文件）
-```
+支持浏览器开发模式与 Windows 便携桌面版。前端使用 React + TypeScript，后端使用 FastAPI，编辑数据先保存在本机。
 
----
+**[完整使用手册](docs/CardArts完整使用手册.md)** · **[Agent 工具参数](docs/Agent工具参数.json)** · **[桌面与本机文件访问](docs/桌面模式与本机文件访问.md)**
+
+## 主要功能
+
+| 模块 | 当前能力 |
+| --- | --- |
+| 项目与牌组 | 示例工程、多牌组、字段定义、卡牌数据表、CSV / XLSX 导入导出、工程备份与版本快照 |
+| 可视化版式 | 拖拽、缩放、旋转、对齐、吸附、参考线、精确尺寸、正反面编辑；支持在版式中编辑当前卡牌的绑定字段 |
+| 图层管理 | 排序、隐藏、锁定、重命名、组合与解组；图层栏支持复选、Ctrl / Command 多选及 Shift 范围选择，组名可独立修改 |
+| 形状与矢量 | 矩形、圆形、椭圆、三角形、六边形、盾牌、旗帜、箭头等预设；支持独立路径填充、描边与 SVG 路径导入 |
+| 精细排版 | 富文本、内联图标、文字描边、竖排、自适应技能块、内容驱动高度、条件显示、字段绑定与重复图标槽位 |
+| 组件与样式 | 共享样式、可复用组件、实例覆盖、自动布局、锚点、剪切组、纹理填充和材质预设；卡牌外工作区可用于组合素材 |
+| 模板模块 | 内置卡牌版式模板、主题和尺寸；支持字段映射、应用模板，以及从当前版式保存项目模板 |
+| 素材与字体 | 图片上传、文件夹整理、裁切、外链图片导入；内置 game-icons 图标搜索与导入；支持上传 TTF / OTF / WOFF / WOFF2 字体并设为项目默认或指定文字字体 |
+| 项目文档 | Markdown 编辑与预览、可编辑表格文档、表格转卡牌 |
+| 导出与打印 | PNG ZIP、卡牌数据、打印 PDF、A4 / Letter 排版、出血与裁切线、Tabletop Simulator 包 |
+| 内置 Agent | 多会话、流式回复、模型与思考设置、计划与工具执行、上下文面板、压缩与历史检索、联网调研、外部 MCP 接入 |
+| 桌面文件访问 | 用户手动授权目录后，Agent 可在该目录内进行基础文件操作及素材导入 |
 
 ## 快速开始
 
-### 0. 一键启动 / 一键关闭（Windows）
+### Windows 便携桌面版
 
-双击项目根目录的脚本即可：
+如果已有打包 ZIP，完整解压后运行 `CardArts.exe`，保留旁边的 `_internal` 目录。无需另外安装 Python 或 Node.js；运行环境需要 **Microsoft Edge WebView2 Runtime**，缺少时需从[微软官方页面](https://developer.microsoft.com/microsoft-edge/webview2/)安装。当前包不包含自动下载安装运行时的引导程序。
 
-- `start.bat` —— 检查环境与依赖，分别在独立窗口启动后端（8000）和前端（5173），
-  等待服务就绪后自动打开浏览器；已在运行的端口会跳过。设置环境变量
-  `CARDARTS_NO_BROWSER=1` 可不自动开浏览器。
-- `stop.bat` —— 关闭上述两个服务窗口、清理残留进程，并确认 8000 / 5173 已释放。
+关闭原生窗口会同时停止本机服务。默认数据位置：
 
-也可在终端中执行 `cmd /c start.bat` 与 `cmd /c stop.bat`。
+| 内容 | 路径 |
+| --- | --- |
+| 后端数据库、素材和日志 | `%LOCALAPPDATA%\CardArts\data\` |
+| 桌面浏览器存储（包含 IndexedDB） | `%LOCALAPPDATA%\CardArts\webview\` |
+| 用户连接的文件夹工作区 | 用户自己选择的目录 |
 
-### 1. 后端
+桌面版与原 Chrome / Edge 开发页面不共用浏览器存储。迁移工程时使用完整备份或连接已有文件夹工作区，核对恢复结果后再启用写回。升级前保留用户数据与工作区备份。
+
+详见 [桌面模式与本机文件访问](docs/桌面模式与本机文件访问.md) 和 [便携版使用说明](packaging/windows/使用说明.txt)。
+
+### 从源码运行
+
+准备 Python、Node.js 和 npm，推荐使用独立 Python 虚拟环境。
+
+Windows 可以双击根目录的 `start.bat`，启动开发后端（8000）和前端（5173）；`stop.bat` 用于停止这套开发服务。
+
+也可以手动启动两个终端：
 
 ```bash
+# 终端一：后端
 cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
-
-启动后：
-
-- API 文档：<http://127.0.0.1:8000/docs>
-- 内置图标库：<http://127.0.0.1:8000/game-icons/delapouite/sword-altar.svg>
-- 数据库：`data/card_arts.db`（SQLite，可换 Postgres）
-- 对象存储：`data/objects/`（内容寻址，sha256 去重）
-- 图标库：`data/game-icons/`（4239 个 SVG）
-- 数据根目录可用环境变量 `CARDARTS_DATA_DIR` 改到别处
-
-### 2. 前端
 
 ```bash
+# 终端二：前端
 cd frontend
-npm install
-npm run dev        # http://localhost:5173
+npm ci
+npm run dev
 ```
-
-`vite.config.ts` 已把 `/api` 与 `/game-icons` 代理到 8000。
 
 ### 3.配置模型
 
@@ -70,262 +81,105 @@ npm run dev        # http://localhost:5173
 <img width="1893" height="857" alt="屏幕截图 2026-10-17 210623" src="https://github.com/user-attachments/assets/c3682286-728e-4cf2-acd0-b0b04c0b9d19" />
 
 
-### 项目与数据
+先安装上述依赖并构建前端：
 
-| 模块 | 能力 |
+```bash
+npm --prefix frontend run build
+python backend/desktop.py
+```
+
+Windows 也可在构建后运行 `start-desktop.bat`。源码入口默认在浏览器中打开桌面服务；终端按 Ctrl+C 退出。需要原生窗口时，安装桌面依赖后运行 `python backend/desktop.py --native`。
+
+### 构建 Windows 便携包
+
+在 Windows 项目根目录执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging/windows/build.ps1
+```
+
+脚本创建独立构建环境、安装锁定依赖、构建前端并运行 PyInstaller，输出：
+
+- `release/CardArts/CardArts.exe`
+- `release/CardArts-Windows-x64.zip`
+
+构建依赖见 [requirements.lock.txt](packaging/windows/requirements.lock.txt)。生成的二进制、用户工程和密钥不纳入 Git。当前打包件未进行代码签名，完整的空白新电脑兼容性仍需验证。
+
+## 推荐使用流程
+
+1. 新建空白工程或打开示例工程，设置牌组尺寸和字段。
+2. 输入或导入卡牌数据，上传图片、图标及所需字体。
+3. 选择模板或手动编辑版式，把文字、图片和图标绑定到字段。
+4. 在图层栏整理组合，将重复结构保存为组件或项目模板。
+5. 切换不同卡牌，检查长文本、空图片、技能数量和打印边界。
+6. 导出备份，再生成 PNG、打印文件或 TTS 包。
+
+精细制作流程见 [精细设计系统与 Agent](docs/精细设计系统与Agent.md)，模板用法见 [卡牌模板模块](docs/卡牌模板模块.md)。
+
+## 内置 Agent
+
+打开项目内聊天窗（Ctrl+K），在模型设置中填写厂商、OpenAI 兼容接口地址、模型和 API Key。模型参数按项目配置；未启用远端模型时，仅提供有限的本地规则指令。
+
+API Key 保存在本机浏览器设置中，不随工程同步上传。使用后端转发时，Key 会随请求传给所连接的后端，因此应使用可信后端。
+
+### 工程操作与长任务
+
+Agent 可访问项目、牌组、字段、卡牌、文档、素材、字体、模板、图层及精细设计操作；完整工具签名以 [Agent 工具参数](docs/Agent工具参数.json) 为准。
+
+- 支持原生 function calling，并为兼容模型保留文本调用解析与异常格式恢复。
+- 通过 `tools.discover` 按需加载工具，减少每轮发送的工具定义。
+- 多步骤任务可维护待办、保存运行检查点，在继续对话时恢复目标和进度。
+- 阶段预算会依据有效进展扩展；仍有总轮次、重复调用和失败保护，复杂任务可能需要继续执行。
+- 只读工具可并行，写入工具串行；破坏性操作按会话权限确认。
+- 聊天正文展示简洁结果，工具调用与参数在详情中查看。
+
+可直接尝试：
+
+> 先检查当前牌组与字段，用现有素材制作一个武将牌版式：左侧竖排姓名，中间插图，底部自适应技能区，右上角体力槽。优先复用模板和组件，不删除已有卡牌。完成后检查长文本溢出，并说明实际修改。
+
+### 模型、思考与上下文
+
+模型设置支持上下文容量与单次输出上限。已识别模型使用预设预算，未知模型或自建网关可以手动覆盖；预设不能保证与网关实际限制一致。
+
+上下文面板展示预算构成、输出预留、安全余量及已挂载资料，提供压缩和历史检索。Token 数量包含估算，厂商返回的实际 usage 可用时单独记录。**上下文容量与单次最大输出是不同限制**，部分模型的推理 Token 也消耗输出额度。
+
+思考开关按厂商和模型转换请求参数，实际可关闭与否取决于上游模型支持。详见完整手册的 Agent 章节。
+
+### 联网搜索与调研
+
+开启联网后，Agent 可使用：
+
+- `web.search`：搜索相关网页。
+- `web.fetch`：读取指定网页正文。
+- `web.research`：组合搜索与多网页读取，返回资料及来源。
+
+默认搜索通道为 DuckDuckGo，也支持配置 Tavily、Brave 或 Serper。联网开关表示允许使用工具；搜索是否成功仍取决于网络、搜索服务和 Key。天气等问题通过通用搜索与网页读取处理，没有专用天气工具。
+
+### 本机文件
+
+桌面模式下，在「设置 → 本机文件访问」中手动选择目录并设定只读或可写权限。Agent 使用 `files.roots` 与 `files.execute`，只能访问授权目录及相对路径，支持列目录、读取、写入、创建目录、复制、移动和导入素材。当前不支持任意覆盖、删除或执行文件，目录授权在服务重启后失效。
+
+浏览器连接文件夹工作区与桌面 Agent 的目录授权是两套机制，不能相互替代。
+
+## MCP 接入
+
+CardArts 同时支持两个方向：
+
+| 方式 | 用途 |
 | --- | --- |
-| 首页 | 新建（空白 / 示例工程）、导入 `.cardarts.json`、复制、删除、备份、从云端拉取 |
-| 牌组与字段 | 多牌组；字段增删改排序、6 种类型（文本/数字/图片/下拉/颜色/是否）、选项管理、是否在表格显示；6 种卡牌尺寸预设；版式复制到其他牌组 |
-| 卡牌数据表 | 内联编辑、搜索、批量复制/删除、CSV / XLSX 导入（表头自动匹配字段）与导出 |
-| 版式编辑器 | 6 种元素（文本/图片/图标/矩形/椭圆/线条）、拖拽移动与四角缩放、图层排序/锁定/隐藏、属性面板、**字段绑定 `{id}`**、**显示条件**（可嵌套条件组）、**数量展开**、样牌切换、撤销 |
-| **插图框** | 图片元素支持两种来源：**固定图**（从素材库挑或直接上传）/ **按卡牌字段取图**（绑 image 字段，每张卡各自配图，卡片没填时回退到固定图）；未选图时在画布上显示虚线占位框（不再隐形）；可直接把图片文件拖到画布上，落在插图框里就替换、落在空处就新建插图框 |
-| **卡牌配图** | 卡牌数据表里 image 类型的字段显示为缩略图，点开即可从素材库挑图或上传本地图片，存的是素材 id |
-| 素材库 | 文件夹树、拖拽上传（秒传 / 分片 / 断点续传 + 进度）、重命名、移动、删除、服务端裁切（按卡牌预设 / 自定义尺寸）、详情（尺寸/主色/sha256） |
-| **内置图标库** | 4239 个 game-icons.net 图标（CC BY 3.0）；搜索（名称/作者）、分页、颜色预览、尺寸预览、多选、**加入自建素材库文件夹并重命名**（支持名称模板 `{name}/{author}/{index}` 与逐个改名、着色、重名策略） |
-| 项目文档 | Markdown 编辑 / 分栏预览 |
-| 版本历史 | 服务端快照保存与恢复 |
-| 导出中心 | 完整备份 JSON、卡牌数据 JSON/CSV/XLSX、PNG 打包 ZIP（Worker 并发渲染，含出血）、打印 PDF、Tabletop Simulator 包（单 ZIP / 每牌组一个 ZIP） |
-| 打印页 | A4/Letter 排布、边距/间距/DPI、双面 + 背面镜像、裁切线、浏览器打印另存 PDF |
-| **AI 助手** | 悬浮聊天窗（Ctrl+K）；**每个项目独立配置大模型**（厂商 / 接口地址 / 模型 / API Key / 温度 / 系统提示），兼容任意 OpenAI 接口；**项目内多会话**（新建 / 切换 / 重命名 / 删除 / 清空），可流式输出并直接改工程 |
-| 其他 | 浅色/深色主题、中英语言、离线可用、自动同步状态指示 |
+| 内置 Agent 连接外部 MCP | 在项目中配置外部服务器，让助手使用其提供的工具 |
+| CardArts 作为 MCP 服务器 | 供外部客户端查询及修改后端已同步的工程、搜索图标、设置字体和管理图层 |
 
----
+这两套工具的覆盖范围不同；外部 MCP 服务器不会直接读取尚未同步的浏览器 IndexedDB 工程，也不自动拥有桌面目录授权。
 
-## 本地优先是怎么做的
-
-1. **所有写入先落 IndexedDB（Dexie）**，再进 `outbox` 队列；离线照常编辑。
-2. 联网后 `sync.ts` 顺序回放队列：`push-project` / `upload-asset`。
-3. **乐观并发**：项目带 `baseRevision` + `localRevision`，`PUT /projects/{id}/sync` 不匹配返回 409。
-   冲突时本地更新则强制覆盖，否则采用服务端内容并把本地旧版另存为「冲突副本」——**绝不丢数据**。
-4. **素材内容寻址**：`storage_key = sha256[:2]/sha256[2:4]/sha256+ext`，相同字节只存一份，天然秒传。
-5. 撤销/重做：每次写操作前把 `content` 快照压入 `history` 表（保留最近 60 步）。
-
----
-
-## 文件夹工作区：把数据写成真实文件
-
-IndexedDB 里的数据看不见摸不着，清缓存就丢。**文件夹工作区**让项目、素材、版本
-变成工作目录下一组可以直接查看、git 归档、拷贝备份的文件。
-
-在首页「本地文件夹工作区」点 **连接文件夹…**，选 `card_arts/workspace`（或任意目录）：
-
-```
-cardarts.json                      索引清单
-projects/{名称}-{id8}.json          项目全文（牌组 / 卡牌 / 版式 / 文档）
-assets/{文件夹}/{文件名}             素材原文件，按界面里的文件夹树直存
-assets/.assets.json                素材元数据（id / sha256 / 尺寸 / 主色）
-versions/{项目}/{序号}-{标签}.json    最近 30 条版本快照
-```
-
-- 运行时仍以 IndexedDB 为主，文件夹是它的持久化镜像，改动后约 1 秒自动写回；
-- 素材按 sha256 判断，内容没变就跳过下载和写盘；
-- 换机器 / 清缓存后，重新连接同一目录点 **从文件夹恢复** 即可读回；
-- 需要 Chromium 内核浏览器（File System Access API）；Safari / Firefox 请用导出中心的完整备份。
-
----
-
-## 项目内大模型与多会话
-
-每个项目都能单独配一套模型参数，互不影响。打开聊天窗（Ctrl+K）→「模型设置」：
-
-| 项 | 说明 |
-| --- | --- |
-| 厂商 | OpenAI / DeepSeek / 通义千问 / Kimi / 智谱 GLM / 硅基流动 / 火山方舟 / OpenRouter / Ollama / 自定义 |
-| 接口地址 | 任意 OpenAI 兼容的 `{base}/chat/completions`，可填自建网关（One-API、New API、LiteLLM） |
-| 模型 | 从预设选，或点「拉取列表」读远端 `/models`，也可手填 |
-| API Key | 只存在本机浏览器，不写进项目文档、不随同步上传 |
-| 温度 / 最大 Token / 系统提示词 | 逐项目可调 |
-| **思考模式开关** | 一个开关适配各家写法，见下节 |
-| 经由本地后端转发 | 推荐开启：走 `POST /api/v1/llm/chat`，规避跨域，密钥只在本机后端流转 |
-
-### 思考模式（深度推理）
-
-各家「开思考」的字段完全不统一，界面上只暴露一个开关，具体参数由 `src/lib/llm.ts`
-按 **厂商预设 → 模型名 → 兜底** 的顺序推断，上层不用关心：
-
-| 厂商 | 实际发出的参数 |
-| --- | --- |
-| DeepSeek | 换模型名 `deepseek-chat` ⇄ `deepseek-reasoner`（已是 `deepseek-v4-pro` 时改用 `thinking:{type:'enabled'}`） |
-| OpenAI o 系列 | `reasoning_effort: low / medium / high` |
-| 通义千问 Qwen3 | `enable_thinking: true / false` |
-| 智谱 GLM / 豆包 / Kimi K2 | `thinking: { type: 'enabled' / 'disabled' }` |
-| Claude / OpenRouter | `thinking: { type:'enabled', budget_tokens: N }` |
-| Kimi K3 | `reasoning_effort: low / high / max` |
-| 自建网关 | `enable_thinking` + `chat_template_kwargs`（可在界面手动改参数形式） |
-
-几个已经踩平的细节：
-
-- **思维链占用输出额度**。DeepSeek 的 `reasoning_content` 最多能到 32K，和正文共用
-  `max_tokens`。开启思考时会自动把「最大 Token」抬到 16384，并给出提示——
-  否则思维链先把配额吃光，正文和工具 JSON 反而被截断。
-- **超出模型自身上限会被厂商 400**。`deepseek-chat` 的输出上限只有 8K，
-  所以会在发出前按模型夹住（界面上有提示），不会让用户撞这个错。
-- **思考模式下不发 `temperature`**（o 系列传了会 400，DeepSeek 传了也不生效）。
-- **思考过程单独展示**：`reasoning_content` / `reasoning` 增量单独收集，
-  在消息里折叠成「思考过程」，不混进正文。
-
-会话：左侧列表可新建任意多个会话，各自保留完整历史；切换 / 重命名 / 删除 / 清空。
-重新打开聊天窗会回到最近一次会话，**不会**自动新建一个空会话。
-未启用模型时是本地规则引擎，仍能听懂「新增一张卡牌 XXX」「把数量改成 2」「统计一下」这类指令。
-
-### 模型可以直接操作整个工程
-
-启用模型后，助手不是只能聊天——它能调用 **67 个工具**直接改工程
-（`src/lib/agentTools.ts` 实现，`src/lib/agentProtocol.ts` 负责解析与调度）：
-
-| 分类 | 工具 |
-| --- | --- |
-| 项目 | `project.overview` `project.rename` `project.setExport` `project.setSetting` |
-| 牌组 | `deck.list` `deck.create` `deck.rename` `deck.delete` `deck.duplicate` `deck.setSize` `deck.setSharedBack` |
-| 字段 | `field.list` `field.add` `field.rename` `field.setType` `field.setOptions` `field.delete` |
-| 卡牌 | `card.list` `card.find` `card.add` `card.addMany` `card.update` `card.set` `card.batchSet` `card.batchFill` `card.delete` `card.duplicate` |
-| 版式元素 | `element.list/add/update/move/resize/style/rename/bind/condition/countExpand/delete`、`layout.setBackground/setBorder/setSize/clear` |
-| 文档 | `doc.list` `doc.create` `doc.update` `doc.append` `doc.read` `doc.delete` |
-| 结构化表格 | `doc.createTable` `doc.tableRead` `doc.tableFind` `doc.tableStats` `doc.tableSet` `doc.tableAddRow` `doc.tableAddColumn` `doc.tableDeleteRow` `doc.tableToCards` |
-| 联网 | `web.search` `web.fetch` |
-| 计划 | `todo.write` |
-| 素材 | `asset.list` `asset.import`（按 URL 导入图片）`asset.use`（放进版式）`asset.rename` `asset.delete` |
-
-工作流程：
-
-1. 每轮请求都会重建前缀：**工程真实快照**（牌组 id、字段 id、元素 id、前 12 条卡牌、导出设置）
-   + 已挂载的知识包 + 已挂载的文档 + 当前待办；
-2. 模型需要改工程时输出一个 JSON 代码块：`{"actions":[{"tool":"card.add","args":{...}}]}`；
-3. 前端按分级执行，把每条的成败回传给模型，最多再走 3 轮让它自我修正；
-4. 执行结果同时显示在对话里（`🔧 执行 N 个动作`），用户看得见改了什么。
-
-定位参数（牌组 / 字段 / 卡牌 / 元素）都支持 id、名称、名称子串、序号（1 起），模型写错也能兜住。
-工具名还支持 `addCard` 这类写法自动纠正成 `card.add`。
-
-### 仿 Claude Code 的三件事
-
-**1. 权限分级**（`ToolSpec.level`）
-
-| 级别 | 行为 | 例子 |
-| --- | --- | --- |
-| `read` | 自动放行，连续多条**并行**跑 | `project.overview` `card.list` `doc.tableRead` `web.*` |
-| `write` | 自动放行，**串行**落库，避免互相踩踏 | `card.add` `element.update` `doc.tableSet` |
-| `destructive` | 弹窗确认；可选「本次会话都允许」，清单存在会话上下文里可随时撤销 | `deck.delete` `card.delete` `layout.clear` `doc.tableDeleteRow` |
-
-工具结果超过 4000 字会自动截断，防止长列表把上下文撑爆。
-
-**1b. 模型跑偏成别的调用格式时的兜底**
-
-DeepSeek 系列偶尔会不按协议来，直接吐它自己训练的原生标签式调用
-（`<｜DSML｜｜invoke name="…">`）。以前这种输出会被整段丢弃 —— 表现为
-「模型说要改，但一条都没执行」，还会在聊天里留下一串乱码。现在三层兜底：
-
-1. **预防**：系统提示词里明确禁止 XML / DSML / `<tool_call>` 式语法，精简模式也保留这条；
-2. **抢救**：DSML 写得完整时直接解析成工具调用执行（半角 `|` 和全角 `｜` 都认）；
-3. **纠正**：解析不出来（比如 `args` 被吐成 `true` 这种残缺值）时不静默结束，
-   而是回一句「你用了不支持的格式，请用 JSON 代码块重发」，让它当场改正；
-   同时把那串标签从展示文本里清掉，用户不再看到乱码。
-
-**2. 可勾选的上下文（提示词前缀）** —— 聊天窗 →「上下文」
-
-- **知识包**：内置 6 个（卡牌数值平衡、PnP 打印规范、版式规格、图标用法、导出指南、助手工作守则），
-  可自建「自定义知识包」写进项目里随项目走；
-- **项目文档**：勾选哪篇就拼哪篇（Markdown 与表格都行），超长自动截断；
-- **联网开关**：关闭时提示词里明确告诉模型「不要用 web.*」；开启时可选搜索引擎通道
-  （默认 DuckDuckGo，无需 Key；也支持 Tavily / Brave / Serper）；
-- **`@` 提及**：输入框里打 `@` 会弹出文档 / 知识包列表，选中即自动挂载，比切面板更快。
-
-**3. 联网**（后端代跑，绕开浏览器跨域）
-
-```
-POST /api/v1/web/search   {query, provider?, api_key?, max_results?, lang?}
-POST /api/v1/web/fetch    {url, max_chars?}
-```
-
-抓取会自动剥掉 script/style、优先取 `<article>/<main>`、剔除页脚噪声并截断。
-典型用法：模型先 `web.search` 找网址，再 `web.fetch` 读正文，然后按查到的规则改牌——不会凭记忆编造。
-
-**4. 待办**：多步骤任务会先用 `todo.write` 列计划，界面上方实时显示 `[x] 完成 / [~] 进行中 / [ ] 待办`。
-
-自检：`node frontend/test_agent_protocol.mjs`（89 项，含分级 / 并行 / 授权 / 截断 / DSML 兜底 / 上下文挂载 /
-「说明书与实现一一对应」校验）、`node frontend/test_thinking.mjs`（56 项，思考模式各厂商参数）、
-`node frontend/test_image_flow.mjs`（36 项，插图框占位 / 按字段取图 / 智能体读素材库 / 图片字段写入）。
-
-### 流式输出
-
-代理通道会把上游 SSE **原样透传**给前端逐字渲染（不再等整段聚合完才出字）。
-后端 `POST /api/v1/llm/chat` 带 `stream: true` 时返回 `text/event-stream`；
-上游报错时也会补一条 `[DONE]` 收尾，前端不会干等。
-自检：`python backend/test_llm_stream.py`（19 项，含「首个分片很快到达」、
-思考参数透传、o 系列字段改名、`reasoning_content` 回传验证）；
-`python backend/test_asset_import.py`（20 项，外链导入含 octet-stream / 302 / 非图片等各种站点行为）。
-
-后端代理接口：
-
-```
-POST /api/v1/llm/chat     转发对话（OpenAI 兼容，stream=true 时透传 SSE）
-POST /api/v1/llm/test     探活 + 顺便列出可用模型
-POST /api/v1/llm/models   拉取远端模型列表
-```
-
-后端不保存任何 api_key，每次请求由前端带回。
-
-### 结构化表格文档
-
-「文档」页现在能上传 **`.xlsx / .xlsm / .xls / .csv / .json`**（以及 `.md/.txt`）：
-
-- xlsx 多 sheet 会拆成多篇文档，各自保留 sheet 名；
-- 表格文档在页面里是**可编辑网格**（改表头 / 改单元格 / 加行 / 加列 / 删行），并能导出 CSV / XLSX；
-- 对模型是**双表示**：`doc.tableRead` 返回 Markdown 表格便于快速扫，
-  `doc.tableSet/tableFind/tableStats/tableToCards` 用来精确改和批量导入卡牌。
-
----
-
-## 素材新增接口
-
-```
-POST /api/v1/assets/import-url              后端代抓外链图片入库
-```
-
-```json
-{ "project_id": "...", "url": "https://…/a.png", "name": "可选.png", "folder_id": null }
-```
-
-智能体没有浏览器环境，在前端直接 fetch 外链会被 CORS 拦掉，所以下载这一步放在后端。
-服务端会跟随 302、按 12MB 上限截断，并在 `Content-Type` 不可信时（很多站点一律返回
-`application/octet-stream`）改用扩展名 + 魔术字节判定类型，非图片直接 400 而不是留下坏素材。
-
-## 图标库新增接口
-
-```
-GET  /api/v1/icons/stats                     图标库统计
-GET  /api/v1/icons/authors                   作者列表（含数量）
-GET  /api/v1/icons?q=&limit=&offset=&author=&color=   检索（返回 total 便于分页）
-GET  /api/v1/icons/{icon_id}/svg?color=&size= 单图标预览（颜色烘进 SVG）
-GET  /game-icons/{author}/{name}.svg         静态原图
-POST /api/v1/icons/import                    加入自建素材库（可改名/指定文件夹/着色）
-POST /api/v1/icons/import-batch              批量加入（名称模板）
-```
-
-`import` 请求体：
-
-```json
-{
-  "project_id": "...",
-  "icon_id": "delapouite/sword-altar",
-  "name": "长剑祭坛",          // 可选，自动补 .svg
-  "folder_id": null,           // 目标文件夹
-  "color": "#e11d48",          // 可选，烘进 SVG
-  "on_conflict": "rename"      // rename | skip | replace
-}
-```
-
----
-
-## MCP 智能体
+安装后端依赖后，以 stdio 启动：
 
 ```bash
 cd backend
-python -m app.mcp.server                      # stdio
-MCP_TRANSPORT=streamable-http MCP_PORT=8765 python -m app.mcp.server
+python -m app.mcp.server
 ```
 
-客户端配置：
+外部客户端配置示例（具体字段以客户端支持为准）：
 
 ```json
 {
@@ -333,34 +187,99 @@ MCP_TRANSPORT=streamable-http MCP_PORT=8765 python -m app.mcp.server
     "cardarts": {
       "command": "python",
       "args": ["-m", "app.mcp.server"],
-      "cwd": "<绝对路径>/card_arts/backend"
+      "cwd": "<项目绝对路径>/backend"
     }
   }
 }
 ```
 
-提供：项目索引 Resource、工程概览 Resource、21 个工具（建牌组 / 改字段 / 批量写卡牌 / 搜图标 / 改版式 / 上传素材等）、2 个 Prompt 模板。
+使用虚拟环境时，将 `command` 改为该环境的 Python 绝对路径。若要访问桌面数据，需为 MCP 进程设置相同的 `CARDARTS_DATA_DIR`。
 
----
+PowerShell 中启用 HTTP 传输：
 
-## 环境变量（backend/.env）
+```powershell
+cd backend
+$env:MCP_TRANSPORT = "streamable-http"
+$env:MCP_PORT = "8765"
+python -m app.mcp.server
+```
 
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `CARDARTS_DATA_DIR` | `<card_arts>/data` | 数据根目录（数据库 / 对象存储 / 图标库） |
-| `DATABASE_URL` | `sqlite+aiosqlite:///.../card_arts.db` | 可换 Postgres |
-| `STORAGE_BACKEND` | `local` | `local` / `s3` |
-| `UPLOAD_CHUNK_SIZE` | 4 MiB | 分片大小 |
-| `UPLOAD_MAX_SIZE` | 2 GiB | 单文件上限 |
-| `ICON_DIR` / `ICON_URL_PREFIX` | `data/game-icons` / `/game-icons` | 内置图标库 |
-| `MCP_TRANSPORT` / `MCP_PORT` | `stdio` / 8765 | MCP 服务 |
-| `CORS_ORIGINS` | `http://localhost:5173,...` | 跨域 |
+MCP 默认监听 `127.0.0.1`。详见 [完整手册的 MCP 说明](docs/CardArts完整使用手册.md#MCP-的两种用法) 与 [图层管理与 MCP](docs/图层管理与MCP.md)。
 
-前端（`.env`）：`VITE_API_BASE` —— 后端不在 8000 同源时用。大模型参数已改为在项目内配置，不再需要环境变量。
+## 数据保存与恢复
 
----
+编辑操作先写入 IndexedDB，再通过同步队列发送到后端。离线可继续本地编辑，使用远端模型、搜索或未缓存素材时仍需要相应服务。
 
-## 备注
+可选文件夹工作区把项目和素材镜像为真实文件：
 
-- 图标版权：game-icons.net，CC BY 3.0（`data/game-icons/LICENSE.txt`）。
-- 想整体搬迁：拷走 `data/`（服务端数据）+ `workspace/`（文件镜像）即可，或设置 `CARDARTS_DATA_DIR`。
+```text
+cardarts.json                     工作区索引
+projects/*.json                   项目、牌组、卡牌、版式与文档
+assets/                           素材原文件
+assets/.assets.json               素材元数据
+versions/                         版本快照
+```
+
+连接已有目录会先尝试恢复，核对项目列表后点击「立即落盘」开启写回。浏览器目录连接需要 File System Access API 支持和用户授权；不支持的环境可以使用工程备份导入导出。
+
+**文件夹工作区、后端 data 目录和浏览器存储各有不同作用。** 迁移前应导出备份并保留素材；不要仅复制程序目录后就删除原用户数据。
+
+## 配置与目录
+
+| 配置 | 作用 |
+| --- | --- |
+| `CARDARTS_DATA_DIR` | 后端数据目录；开发模式默认根目录 `data/`，桌面模式默认用户数据目录 |
+| `DATABASE_URL` | 数据库连接，默认 SQLite |
+| `STORAGE_BACKEND` | 素材存储后端，默认 `local`，可配置 `s3`（需额外依赖及凭据） |
+| `ICON_DIR` / `ICON_URL_PREFIX` | 内置图标目录与访问前缀 |
+| `MCP_TRANSPORT` / `MCP_HOST` / `MCP_PORT` | 外部 MCP 服务传输方式、监听地址与端口 |
+| `CORS_ORIGINS` | 开发模式允许的跨域来源 |
+| `VITE_API_BASE` | 前端 API 地址，默认 `/api/v1`；修改后需重新构建 |
+
+后端配置支持 `backend/.env`。桌面启动器只监听本机，使用会话认证，并将可变用户数据与程序资源分开。前端构建产物存在时，FastAPI 可同时托管页面与 API。
+
+```text
+backend/                  API、同步、素材、MCP 与桌面启动器
+frontend/                 React 编辑器、内置 Agent 与本地存储
+data/game-icons/          内置图标及授权说明
+docs/                     使用手册与专题文档
+packaging/windows/        Windows 构建脚本与锁定依赖
+CardArts.spec             PyInstaller 配置
+```
+
+## 开发检查
+
+```bash
+npm --prefix frontend run build
+npm --prefix frontend run test:agent
+npm --prefix frontend run test:design
+npm --prefix frontend run test:cardfields
+npm --prefix frontend run test:documents
+```
+
+工作区恢复测试需从 `frontend` 目录运行：
+
+```bash
+cd frontend
+node test_workspace_restore.mjs
+```
+
+后端回归测试从 `backend` 目录运行：
+
+```bash
+python -m unittest test_layers test_local_files test_web_tools -v
+```
+
+部分文件系统测试依赖操作系统权限，网络搜索与模型端到端行为需要在实际服务环境另行验证。
+
+## 文档与素材许可
+
+- [完整使用手册](docs/CardArts完整使用手册.md)
+- [Agent 工具参数（JSON）](docs/Agent工具参数.json)
+- [卡牌模板模块](docs/卡牌模板模块.md)
+- [图层管理与 MCP](docs/图层管理与MCP.md)
+- [版式内卡牌数据编辑](docs/版式内卡牌数据编辑.md)
+- [精细设计系统与 Agent](docs/精细设计系统与Agent.md)
+- [桌面模式与本机文件访问](docs/桌面模式与本机文件访问.md)
+
+内置 game-icons.net 图标采用 **CC BY 3.0**，具体作者及许可见 [图标授权说明](data/game-icons/LICENSE.txt)。自备插画、字体和纹理请遵守各自许可。

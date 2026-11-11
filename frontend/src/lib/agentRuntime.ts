@@ -9,6 +9,8 @@ import type { NativeToolCall } from './agentStream';
 
 export type RunStatus = 'completed' | 'round_limit' | 'output_limit' | 'invalid_output' | 'blocked';
 export interface RuntimeOptions {
+  onTaskState?: (state:{round:number;phase:string;lastTools:string[];budget?:number;hardLimit?:number})=>Promise<void>;
+  completionCheck?: ()=>Promise<string>;
   onCheckpoint?: (messages: AgentMessage[]) => Promise<void>;
   onContext?: (stats: { dropped: number; estimatedTokens: number }) => void;
   toolTokens?: number;
@@ -29,6 +31,16 @@ interface NativeCall {
   call: ToolCall;
 }
 
+/** 流式文本尚未闭合时也隐藏工具代码，避免参数在聊天正文中闪现。 */
+export function visibleAgentReply(content: string): string {
+  const parsed = parseReply(content);
+  if (parsed.calls.length) return parsed.text;
+  const fence = content.search(/```(?:json)?\s*(?:\{|\[|$)/i);
+  if (fence >= 0 && (!content.slice(fence + 3).includes('```') || /"(?:actions|tool|calls)"\s*:/.test(content.slice(fence)))) return content.slice(0, fence).trimEnd();
+  if (/^\s*[\[{]\s*"(?:actions|tool|calls)"/.test(content)) return '';
+  return content;
+}
+
 /** 原生工具调用转内部结构；参数没写完（被截断）的那一条丢弃，前面的都完整。 */
 function decodeNative(tcs: NativeToolCall[]): NativeCall[] {
   const out: NativeCall[] = [];
@@ -44,17 +56,29 @@ function decodeNative(tcs: NativeToolCall[]): NativeCall[] {
 /** UI-independent state machine. Never executes an incomplete model response. */
 export async function runAgent(options: RuntimeOptions): Promise<{ status: RunStatus; rounds: number }> {
   const current: AgentMessage[] = [{ role: 'user', content: options.userText }];
-  const maxRounds = options.maxRounds ?? 12;
+  const maxRounds = Number.isFinite(options.maxRounds) ? Math.max(1,Math.min(96,Math.floor(options.maxRounds!))) : 32;
+  let previousStep='',repeatedSteps=0;
+  let roundBudget=Math.min(16,maxRounds),stageProgress=0;
+  const seenSteps=new Set<string>();
   let text = '';
   let stalledRounds = 0;
   let contextNotice = false;
+  let completionRetried=false;
   const publish = (value: string) => { text = value; options.onText(text); };
   const note = (value: string) => publish([text, value].filter(Boolean).join('\n\n'));
 
-  for (let round = 0; round < maxRounds; round++) {
+  for (let round = 0; round < roundBudget; round++) {
     if (options.signal?.aborted) throw new DOMException('aborted', 'AbortError');
     await options.onCheckpoint?.(structuredClone(current));
-    const context = selectContext(await options.system(), options.history, current, options.contextWindow, options.outputTokens + (options.toolTokens ?? 0));
+    await options.onTaskState?.({round:round+1,phase:'planning',lastTools:[],budget:roundBudget,hardLimit:maxRounds});
+    // 保留完整检查点，仅压缩发给模型的较早长工具正文；保留结果开头和归档引用尾部。
+    const budget=(options.contextWindow??65536)-options.outputTokens-(options.toolTokens??0)-1024;
+    const packed=contextTokens(JSON.stringify(current))>budget*.65?current.map((m,i)=>{
+      if(i>=current.length-6||m.content.length<3000)return m;
+      if(m.role!=='tool'&&!m.content.startsWith('以下是工具执行结果'))return m;
+      return {...m,content:m.content.slice(0,1500)+'\n[较早工具结果已缩略，完整内容保留在执行记录；需要时用会话工具查原文或归档引用]\n'+m.content.slice(-700)};
+    }):current;
+    const context = selectContext(await options.system(), options.history, packed, options.contextWindow, options.outputTokens + (options.toolTokens ?? 0));
     options.onContext?.({ dropped: context.dropped, estimatedTokens: contextTokens(JSON.stringify(context.messages)) + (options.toolTokens ?? 0) });
     if (context.dropped && !contextNotice) {
       note(`ℹ️ 为保留当前任务的完整记录，本次未发送较早的 ${context.dropped} 条历史消息。`);
@@ -65,7 +89,7 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
     let streamed = '';
     const reply = await options.complete(context.messages, (delta) => {
       streamed += delta;
-      publish([before, streamed].filter(Boolean).join('\n\n'));
+      publish([before, visibleAgentReply(streamed)].filter(Boolean).join('\n\n'));
     }, (value) => { reason = value; });
     if (options.signal?.aborted) throw new DOMException('aborted', 'AbortError');
 
@@ -81,6 +105,7 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
     /** 执行一批动作并把结果按协议写回：native → assistant.tool_calls + role:tool；text → user 汇总 */
     const executeRound = async (nativeCalls: NativeCall[], calls: ToolCall[], instruction: string): Promise<boolean> => {
       const allCalls = [...nativeCalls.map((x) => x.call), ...calls];
+      await options.onTaskState?.({round:round+1,phase:'executing',lastTools:allCalls.map(c=>c.tool)});
       if (nativeCalls.length) {
         const wire: WireToolCall[] = nativeCalls.map((x) => ({
           id: x.id,
@@ -91,10 +116,16 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
       } else {
         current.push({ role: 'assistant', content: compressReply(reply.content, parsed) });
       }
-      note(`🔧 执行 ${allCalls.length} 个动作`);
+      // 完整调用与结果已写入执行记录/结构化历史，聊天正文只保留最终答复。
+      if (!truncation) publish(before);
+      options.onText(text || '正在执行…');
       await options.onCheckpoint?.(structuredClone(current));
       const result = await options.execute(allCalls);
-      note(result.text);
+      const step=JSON.stringify({calls:allCalls,records:result.records.map(r=>({status:r.status,content:r.content})),text:result.text});
+      repeatedSteps=step===previousStep?repeatedSteps+1:0;previousStep=step;
+      const successful=result.records.length?result.records.some(r=>r.status==='success'):!!result.text.trim();
+      if(successful&&!seenSteps.has(step)){stageProgress++;seenSteps.add(step);}
+      options.onText(text || '正在整理结果…');
       nativeCalls.forEach((x, i) => {
         current.push({ role: 'tool', tool_call_id: x.id, content: result.records[i]?.content ?? '' });
       });
@@ -112,7 +143,11 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
         ].filter(Boolean).join('\n'),
       });
       await options.onCheckpoint?.(structuredClone(current));
-      return result.records.length > 0 && result.records.every((r) => r.status !== 'success');
+      if(round+1===roundBudget&&roundBudget<maxRounds&&stageProgress>0&&successful&&repeatedSteps===0){
+        roundBudget=Math.min(maxRounds,roundBudget+8);stageProgress=0;
+        await options.onTaskState?.({round:round+1,phase:'continuing',lastTools:allCalls.map(c=>c.tool),budget:roundBudget,hardLimit:maxRounds});
+      }
+      return repeatedSteps>=2 || (result.records.length > 0 && result.records.every((r) => r.status !== 'success'));
     };
 
     if (truncation) {
@@ -134,7 +169,7 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
         continue;
       }
       // 一个完整动作都没有：维持原行为，停手请用户继续
-      publish([before, reply.content].filter(Boolean).join('\n\n'));
+      publish([before, visibleAgentReply(reply.content)].filter(Boolean).join('\n\n'));
       note(reason === 'length'
         ? `⚠️ 本轮达到实际输出上限 ${options.outputTokens} Token，本轮工具未执行。之前成功的操作已保留；请继续剩余任务，或提高输出额度并减小单批数量。`
         : '⚠️ 回复格式不完整，无法确认是否正常结束，本轮工具未执行。请继续剩余任务；不要重复已成功的操作。');
@@ -142,12 +177,12 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
     }
 
     if (reason && !['stop', 'tool_calls', 'function_call'].includes(reason)) {
-      publish([before, reply.content].filter(Boolean).join('\n\n'));
+      publish([before, visibleAgentReply(reply.content)].filter(Boolean).join('\n\n'));
       note(`⚠️ 模型以 ${reason} 结束，本轮工具未执行。`);
       return { status: 'blocked', rounds: round + 1 };
     }
 
-    publish([before, parsed.text].filter(Boolean).join('\n\n'));
+    publish([before, visibleAgentReply(parsed.text)].filter(Boolean).join('\n\n'));
     const brokenToolOutput: boolean = /"(?:actions|tool|calls)"\s*:/.test(parsed.text)
       || (looksTruncated(reply.content) && /```|DSML/.test(reply.content));
     if (brokenToolOutput) {
@@ -165,6 +200,12 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
       if (!reply.content.trim()) {
         note('⚠️ 模型未返回正文或可执行动作，任务尚未确认完成。');
         return { status: 'invalid_output', rounds: round + 1 };
+      }
+      if(options.completionCheck){
+        await options.onTaskState?.({round:round+1,phase:'verifying',lastTools:[]});
+        const pending=await options.completionCheck();
+        if(pending&&completionRetried){note(`⚠️ 尚有未完成待办：${pending}。本次停止，任务未确认完成；请核对执行记录后继续。`);return {status:'blocked',rounds:round+1};}
+        if(pending){completionRetried=true;current.push({role:'assistant',content:reply.content},{role:'user',content:`完成检查尚未通过：${pending}。请核对当前工程、处理剩余任务并更新待办；若确实受阻，明确说明阻碍，不得虚报完成。`});publish(before);continue;}
       }
       current.push({ role: 'assistant', content: reply.content });
       await options.onCheckpoint?.(structuredClone(current));
@@ -190,6 +231,6 @@ export async function runAgent(options: RuntimeOptions): Promise<{ status: RunSt
       return { status: 'blocked', rounds: round + 1 };
     }
   }
-  note(`⚠️ 已达到本次 ${maxRounds} 轮运行上限，任务可能尚未完成。已成功的操作已保留，可继续剩余步骤。`);
-  return { status: 'round_limit', rounds: maxRounds };
+  note(`⚠️ 已用完本阶段 ${roundBudget} 轮预算（本次硬上限 ${maxRounds}）。任务尚未确认完成，已成功的操作已保留；可核对执行记录后继续，或在模型设置调整执行轮数。`);
+  return { status: 'round_limit', rounds: roundBudget };
 }

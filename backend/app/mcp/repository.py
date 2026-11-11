@@ -366,3 +366,39 @@ async def set_font(session: AsyncSession, project_id: str, font: str, *, deck_id
         p.content.setdefault("settings", {})["defaultFont"] = matches[0]["key"]
     await _commit_project(session, p)
     return {"font": matches[0], "updated": len(targets), "default_updated": set_default}
+
+
+async def list_layers(session: AsyncSession, project_id: str, deck_id: str, side: str = "front") -> dict:
+    if side not in {"front", "back"}:
+        raise GuardError("side 必须为 front/back")
+    p = await get_project_or_404(session, project_id)
+    layout = find_deck(p, deck_id).get("frontLayout" if side == "front" else "backLayout")
+    if not layout:
+        raise NotFound("版式不存在")
+    return {"revision": p.revision, "order": "top-to-bottom", "layers": [
+        {"id": e.get("id"), "name": e.get("name"), "kind": e.get("kind"), "index": i,
+         "hidden": bool(e.get("hidden")), "locked": bool(e.get("locked")), "groupId": e.get("groupId")}
+        for i, e in reversed(list(enumerate(layout.get("elements") or [])))]}
+
+
+async def manage_layers(session: AsyncSession, project_id: str, deck_id: str, side: str, operation: str,
+                        ids: list[str], *, target: str | None = None, name: str | None = None,
+                        order: list[str] | None = None, expand_groups: bool = True,
+                        expected_revision: int | None = None) -> dict:
+    from app.mcp.layers import apply_layers
+    if side not in {"front", "back"}:
+        raise GuardError("side 必须为 front/back")
+    p = await get_project_or_404(session, project_id)
+    if expected_revision is not None and p.revision != expected_revision:
+        raise GuardError("工程版本已变化，请重新 list_layers")
+    layout = find_deck(p, deck_id).get("frontLayout" if side == "front" else "backLayout")
+    if not layout:
+        raise NotFound("版式不存在")
+    try:
+        changed = apply_layers(layout.get("elements") or [], operation, ids, target=target, name=name,
+                               order=order, expand_groups=expand_groups)
+    except ValueError as error:
+        raise GuardError(str(error)) from error
+    layout["elements"] = changed
+    await _commit_project(session, p)
+    return {"revision": p.revision, "operation": operation, "order_bottom_to_top": [e["id"] for e in changed]}

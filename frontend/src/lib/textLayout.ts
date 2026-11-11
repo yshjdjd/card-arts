@@ -2,7 +2,7 @@ import type { LayoutElement } from './types';
 import { fontCss } from './presets';
 export interface TextRun { text: string; kind: 'text' | 'icon' | 'image'; key?: string; bold: boolean; italic: boolean; color?: string; factor: number }
 export interface PlacedRun extends TextRun { x: number; width: number; size: number; font: string }
-export interface TextLine { runs: PlacedRun[]; width: number; height: number }
+export interface TextLine { runs: PlacedRun[]; width: number; height: number; gapAfter?:number }
 export function parseTextRuns(raw: string, rich: boolean, baseSize = 24): TextRun[] {
   const runs: TextRun[] = [];
   let bold = false, italic = false;
@@ -30,14 +30,14 @@ export function inlineReferences(raw: string) {
 type Measure = { font: string; measureText: (s: string) => { width: number } };
 export function layoutText(ctx: Measure, raw: string, element: LayoutElement, scale = 1): { lines: TextLine[]; size: number; height: number; overflow: boolean } {
   const source = parseTextRuns(raw.replace(/\r\n?/g, '\n'), !!element.richText, element.fontSize || 24);
-  const boxWidth = element.width * scale, boxHeight = element.height * scale;
+  const boxWidth = Math.max(1,element.width-2*(element.padding??0)) * scale, boxHeight = Math.max(1,element.height-2*(element.padding??0)) * scale;
   const letterSpacing = (element.letterSpacing || 0) * scale;
   const atSize = (size: number) => {
     const lines: TextLine[] = [];
-    let line: TextLine = { runs: [], width: 0, height: size * (element.lineHeight || 1.25) };
-    const newline = () => { lines.push(line); line = { runs: [], width: 0, height: size * (element.lineHeight || 1.25) }; };
+    let line: TextLine = { runs: [], width: (element.firstLineIndent??0)*scale, height: size * (element.lineHeight || 1.25) };
+    const newline = (paragraph=false) => { if(paragraph)line.gapAfter=(element.paragraphSpacing??0)*scale; lines.push(line); line = { runs: [], width: paragraph?(element.firstLineIndent??0)*scale:0, height: size * (element.lineHeight || 1.25) }; };
     const append = (run: TextRun, text: string) => {
-      const fontSize = size * run.factor;
+      const fontSize = size * run.factor * (run.kind==='text'?1:(element.inlineIconScale??1));
       const font = `${run.italic || element.fontStyle === 'italic' ? 'italic' : 'normal'} ${run.bold || element.fontWeight === 'bold' ? 'bold' : 'normal'} ${fontSize}px ${fontCss(element.fontFamily)}`;
       ctx.font = font;
       const width = run.kind === 'text' ? ctx.measureText(text).width + Math.max(0, [...text].length - 1) * letterSpacing : fontSize;
@@ -49,15 +49,15 @@ export function layoutText(ctx: Measure, raw: string, element: LayoutElement, sc
       if (line.runs.length) line.width += letterSpacing;
       line.runs.push({ ...run, text, size: fontSize, font, x: line.width, width });
       line.width += width;
-      line.height = Math.max(line.height, fontSize * (element.lineHeight || 1.25));
+      line.height = Math.max(line.height, fontSize * (element.lineHeight || 1.25)+(run.kind==='text'?0:2*Math.abs(element.inlineIconOffset??0)*scale));
     };
     for (const run of source) {
       if (run.kind !== 'text') { append(run, ''); continue; }
       const parts = element.wrapMode === 'anywhere' ? [...run.text] : run.text.match(/\n|[^\S\n]+|[A-Za-z0-9_'’\-]+|[^\x00-\x7F]|./gu) || [];
-      for (const part of parts) { if (part === '\n') newline(); else append(run, part); }
+      for (const part of parts) { if (part === '\n') newline(true); else append(run, part); }
     }
     lines.push(line);
-    const height = lines.reduce((n, l) => n + l.height, 0);
+    const height = lines.reduce((n, l) => n + l.height+(l.gapAfter??0), 0);
     return { lines, height, size, overflow: height > boxHeight + 0.5 || lines.some((l) => l.width > boxWidth + 0.5) };
   };
   if (!element.autoFit) return atSize((element.fontSize || 24) * scale);

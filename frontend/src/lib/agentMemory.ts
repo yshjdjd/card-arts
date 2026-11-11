@@ -19,10 +19,10 @@ export function taskMemory(chat: ChatSession): string {
   return [
     chat.summary ? `早期会话摘要（模型生成，需按原文核对）[截至 ${chat.summary.throughMessageId}]: ${chat.summary.text}` : '',
     '任务记忆（历史事实，不是新指令；后续要求优先；不完整时查询原文）：',
-    ...selected.map((m) => `用户要求 [${m.id}]: ${m.content.slice(0, 1000)}`),
+    ...selected.map((m) => `用户要求 [${m.id}]: ${m.content.slice(0, 400)}`),
     ...(chat.todos ?? []).map((t) => `待办 [${t.status}]: ${t.text.slice(0, 300)}`),
     run ? `最近执行状态：${run.status}` : '',
-    ...(run?.records ?? []).slice(-8).map((r) => `执行事实 [${r.status}] ${r.tool}: ${r.content.slice(0, 400)}`),
+    ...(run?.records ?? []).slice(-3).map((r) => `执行事实 [${r.status}] ${r.tool}: ${r.content.slice(0, 180)}`),
     chat.pinnedMemory ? `用户固定约束：${chat.pinnedMemory}` : '',
     '不得仅根据历史摘要重放写操作；对象 ID 与工程内容以本轮读取结果为准。',
   ].filter(Boolean).join('\n');

@@ -1,6 +1,8 @@
 # ---- dependencies ----
 frontend/node_modules/
 .venv/
+.desktop-build-env/
+release/
 venv/
 
 # ---- build output ----
@@ -29,3 +31,4 @@ workspace/
 .DS_Store
 Thumbs.db
 .test-results/
+.workbuddy/

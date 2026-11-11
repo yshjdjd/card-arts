@@ -284,10 +284,14 @@ export function ProjectProvider({ projectId, children }: { projectId: string; ch
   );
 
   const undo = useCallback(async () => {
+    const {flushProjectCardDrafts}=await import('../db/cardDraftRegistry');
+    if(!await flushProjectCardDrafts(projectId))return;
     await stepProjectHistory(projectId, 'undo');
     await refreshStacks(); void flush().catch(() => {});
   }, [projectId, refreshStacks]);
   const redo = useCallback(async () => {
+    const {flushProjectCardDrafts}=await import('../db/cardDraftRegistry');
+    if(!await flushProjectCardDrafts(projectId))return;
     await stepProjectHistory(projectId, 'redo');
     await refreshStacks(); void flush().catch(() => {});
   }, [projectId, refreshStacks]);

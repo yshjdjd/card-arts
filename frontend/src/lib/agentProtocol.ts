@@ -24,6 +24,9 @@ export interface ToolSpec {
 }
 
 export const TOOL_SPECS: ToolSpec[] = [
+  {name:'files.roots',level:'read',doc:'files.roots {} → 列出用户已授权的本机目录ID。仅本机桌面模式可用；不能授予目录权限。'},
+  {name:'files.execute',level:'write',doc:'files.execute {grant,path?,operation:list/read/write/mkdir/copy/move/import,target?,text?} → 在授权目录内操作相对路径。write只创建新UTF-8文件，禁止覆盖；copy/move只支持单文件且目标不能存在；import将图片/字体导入当前项目素材库。路径分隔符用/；不支持删除、执行程序或绝对路径。'},
+  {name:'tools.discover',level:'read',doc:'tools.discover {query?,names?[]} → 按分类关键词或精确工具名检索并加载工具，下一轮获得参数。分类 project/deck/field/card/element/layout/layer/design/template/doc/asset/font/web/conversation/files；每次最多8项。'},
   { name: 'project.overview', level: 'read', doc: 'project.overview {} → 读取项目全貌（牌组/字段/卡牌/版式/文档/设置的真实 id）' },
   { name: 'project.rename', level: 'write', doc: 'project.rename {name} → 改项目名' },
   { name: 'project.setExport', level: 'write', doc: 'project.setExport {dpi?,bleedMm?,duplex?,flipOnBack?,cutLines?,pageSize?} → 改导出/打印设置' },
@@ -51,8 +54,18 @@ export const TOOL_SPECS: ToolSpec[] = [
   { name: 'card.batchFill', level: 'write', doc: 'card.batchFill {deck,items:[{card,values}]} → 按卡逐条批量改' },
   { name: 'card.delete', level: 'destructive', doc: 'card.delete {deck,card} → 删除卡牌' },
   { name: 'card.duplicate', level: 'write', doc: 'card.duplicate {deck,card,n?} → 复制卡牌' },
+  {name:'design.catalog',level:'read',doc:'design.catalog {} → 查询项目共享样式、组件ID、修订版本、字段需求和自动布局'},
+  {name:'design.execute',level:'write',doc:'design.execute {deck,side,operation,args:{...}} → 体力显示用element.update patch设置countFieldId为真实数字字段、countMax上限、countSlots固定总格数、countSlotsFieldId绑定总格数数字字段（优先，0不显示）、countHalf:true支持半格、countEmptyOpacity:0-1控制空格。精细设计。operation: material.apply(ids,material:gold/silver/bronze/parchment/jade/lacquer) 对形状应用材质，替换填充纹理描边阴影； clip.create(ids,source) 用真实矩形/椭圆/路径元素裁切所选图层，源不单独显示；clip.release(ids)解除；暂不支持嵌套。 skill.create(title,body,titleField?,bodyField?,x?,y?,width?,fontSize?) 创建带自适应底板的技能块； style.save(name,properties,style?更新)/style.apply(style,ids)/style.reset(style,ids)/style.detach(ids)；component.save(name,ids,component?更新并同步)/component.insert(component,x?,y?)/component.sync(component)/component.reset(component)/component.detach(ids)；layout.anchor(ids,horizontal:left/right/center/stretch,vertical:top/bottom/center/stretch)/layout.flow(ids,direction:horizontal/vertical,gap?,padding?,x?,y?,width?,align?)/layout.grow(ids,maxHeight,image?,minImageHeight?)/layout.clear(ids)/layout.guide(axis:x/y,value或clear:true)。element.precise(ids,x?,y?,width?,height?,unit:px/mm)支持四则算式精确排版；text.snippet.save(name,text)保存规则片段；text.snippet.insert(ids,snippet)插入静态文本。先查询真实ID。共享更新影响全项目；局部覆盖默认保留。component.reset会丢弃全部实例覆盖，需确认。文字方向用element.update patch设置writingMode:horizontal/vertical-rl/vertical-lr；竖排中英文均为直立字形，borderColor/borderWidth设文字描边。形状纹理用element.update patch设置textureAssetId（先asset.list取得真实图片ID）、textureMode:cover/repeat、textureScale:正数；纹理优先于渐变和纯色。效果用element.update patch设置padding/paragraphSpacing/firstLineIndent/inlineIconScale/inlineIconOffset/gradient:{from,to,angle}/shadow:{color,blur,x,y}/imageMask:ellipse或rectangle/maskPath:0-100坐标SVG路径/blendMode。'},
+  {name:'design.preflight',level:'read',doc:'design.preflight {deck,side} → 渲染全牌组并检查溢出、小字号、缩字过多、低分辨率图片、低对比、缺失素材及样式/组件/字段引用，返回定位ID；不会修改工程'},
+  { name:'template.list',level:'read',doc:'template.list {query?} → 查询内置与本项目保存的版式模板；返回真实 id、用途和字段需求' },
+  { name:'template.inspect',level:'read',doc:'template.inspect {template,deck?,theme?,preset?,side?,mapping?} → 只读预览版式、字段绑定和将新增的字段；theme:parchment/midnight/minimal；preset 用尺寸预设；side:front/back/both；mapping 为模板字段id到已有字段id' },
+  { name:'template.create',level:'write',doc:'template.create {template,name?,theme?,preset?,side?} → 按模板新建空牌组，不改现有牌组；先 list/inspect；使用真实模板id' },
+  { name:'template.apply',level:'destructive',doc:'template.apply {template,deck,theme?,preset?,side?,mapping?} → 替换现有牌组指定面的版式，保留卡牌和字段，可撤销；先 inspect 核对字段映射并确认替换范围' },
+  { name:'template.save',level:'write',doc:'template.save {deck,name} → 将牌组正反面和字段保存为项目模板，供界面与Agent复用；素材引用依赖本项目' },
+  { name: 'layer.list', level: 'read', doc: 'layer.list {deck,side} → 列出顶层到底层的真实图层 ID、序号、组、锁定和隐藏状态' },
+  { name: 'layer.manage', level: 'write', doc: 'layer.manage {deck,side,operation,ids,target?,name?,order?,expandGroups?} → 管理图层；operation: front/back/up/down/above/below/order/rename/renameGroup/show/hide/lock/unlock/group/ungroup；先 layer.list；ids 使用真实 ID；order 为完整底层到顶层 ID 数组；锁定层需先 unlock；默认操作整组，expandGroups:false 可单层操作；above/below 用 target ID' },
   { name: 'element.list', level: 'read', doc: 'element.list {deck,side} → 列出某面版式的元素（side: front|back）' },
-  { name: 'element.add', level: 'write', doc: 'element.add {deck,side,kind,x,y,width,height,name?,fieldId?,text?,fill?,color?,fontSize?,fontFamily?,richText?} → 新增元素；kind 可选 text/image/icon/rectangle/ellipse/line' },
+  { name: 'element.add', level: 'write', doc: 'element.add {deck,side,kind,x,y,width,height,name?,fieldId?,text?,fill?,color?,fontSize?,fontFamily?,richText?} → 新增元素；kind 可选 text/image/icon/rectangle/ellipse/line/path' },
   { name: 'element.update', level: 'write', doc: 'element.update {deck,side,element,patch:{...}} → 改元素任意属性（x/y/width/height/fill/color/fontSize/fieldId/…）' },
   { name: 'element.move', level: 'write', doc: 'element.move {deck,side,element,x,y} → 移动' },
   { name: 'element.resize', level: 'write', doc: 'element.resize {deck,side,element,width,height} → 改尺寸' },
@@ -60,7 +73,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   { name: 'element.rename', level: 'write', doc: 'element.rename {deck,side,element,name} → 元素改名' },
   { name: 'element.bind', level: 'write', doc: 'element.bind {deck,side,element,fieldId} → 绑定字段（留空解除）' },
   { name: 'element.condition', level: 'write', doc: 'element.condition {deck,side,element,field,op,value|conditions[],mode,clear} → 显示条件；op: equals/notEquals/gt/gte/lt/lte/contains/isEmpty/isNotEmpty' },
-  { name: 'element.countExpand', level: 'write', doc: 'element.countExpand {deck,side,element,fieldId?,max?,spacing?,direction?} → 数量展开（按某字段重复绘制）' },
+  { name: 'element.countExpand', level: 'write', doc: 'element.countExpand {deck,side,element,fieldId?,max?,spacing?,direction?,slotsField?,slots?,half?,clear?} → 数量展开（按某字段重复绘制）' },
   { name: 'element.delete', level: 'destructive', doc: 'element.delete {deck,side,element} → 删除元素' },
   { name: 'layout.setBackground', level: 'write', doc: 'layout.setBackground {deck,side,color?,assetId?} → 改版式背景' },
   { name: 'layout.setBorder', level: 'write', doc: 'layout.setBorder {deck,side,color?,width?,radius?} → 改版式边框' },
@@ -94,6 +107,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   { name: 'doc.tableToCards', level: 'write', doc: 'doc.tableToCards {doc,deck,mode?} → 把表格导入成卡牌（mode: append|replace）' },
   // 联网
   { name: 'web.search', level: 'read', doc: 'web.search {query,maxResults?} → 联网搜索，返回标题/网址/摘要' },
+  { name: 'web.research', level: 'read', doc: 'web.research {query,maxPages?} → 网络调研：搜索并并行读取最多 5 个来源的正文，返回来源网址、时间、正文及各来源失败原因；可继续追问检索和交叉核对' },
   { name: 'web.fetch', level: 'read', doc: 'web.fetch {url,offset?,limit?,maxChars?} → 分页抓取网页正文；默认每页 2500 字符，按 nextOffset 继续；最多抓取 120000 字符' },
   // 计划
   { name: 'todo.write', level: 'write', doc: 'todo.write {items:[{text,status}]} → 建立或更新待办清单（status: pending|in_progress|done）' },
@@ -141,7 +155,7 @@ const S = {
   preset: { type: 'string', enum: ['poker', 'bridge', 'tarot', 'mini', 'euro', 'square'] },
   fieldType: { type: 'string', enum: ['text', 'number', 'image', 'select', 'color', 'boolean'] },
   condOp: { type: 'string', enum: ['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'contains', 'isEmpty', 'isNotEmpty'] },
-  elemKind: { type: 'string', enum: ['text', 'image', 'icon', 'rectangle', 'ellipse', 'line'] },
+  elemKind: { type: 'string', enum: ['text', 'image', 'icon', 'rectangle', 'ellipse', 'line', 'path'] },
   alignH: { type: 'string', enum: ['left', 'center', 'right'] },
   alignV: { type: 'string', enum: ['top', 'middle', 'bottom'] },
   dir: { type: 'string', enum: ['horizontal', 'vertical'] },
@@ -157,6 +171,9 @@ const arr = (items: unknown) => ({ type: 'array', items });
 
 /** 每个工具的参数 JSON Schema；与 TOOL_SPECS 一一对应，缺失则退化为「任意对象」 */
 export const TOOL_PARAMS: Record<string, Record<string, unknown>> = {
+  'files.roots':obj({}),
+  'files.execute':obj({grant:S.str,path:S.str,operation:{type:'string',enum:['list','read','write','mkdir','copy','move','import']},target:S.str,text:S.str},['grant','operation']),
+  'tools.discover':obj({query:S.str,names:{type:'array',items:S.str}}),
   'project.overview': obj({}),
   'project.rename': obj({ name: S.str }, ['name']),
   'project.setExport': obj({
@@ -190,9 +207,19 @@ export const TOOL_PARAMS: Record<string, Record<string, unknown>> = {
   'card.batchFill': obj({ deck: S.deck, items: arr(obj({})) }, ['deck', 'items']),
   'card.delete': obj({ deck: S.deck, card: S.card }, ['deck', 'card']),
   'card.duplicate': obj({ deck: S.deck, card: S.card, n: S.num }, ['deck', 'card']),
+  'design.catalog':obj({}),
+  'design.execute':obj({deck:S.deck,side:S.side,operation:{type:'string',enum:['material.apply','clip.create','clip.release','skill.create','style.save','style.apply','style.reset','style.detach','component.save','component.insert','component.sync','component.reset','component.detach','layout.anchor','layout.flow','layout.grow','layout.clear','layout.guide','element.precise','text.snippet.save','text.snippet.insert']},args:obj({})},['deck','side','operation','args']),
+  'design.preflight':obj({deck:S.deck,side:S.side},['deck','side']),
+  'template.list':obj({query:S.str}),
+  'template.inspect':obj({template:S.str,deck:S.deck,theme:{type:'string',enum:['parchment','midnight','minimal']},preset:S.preset,side:{type:'string',enum:['front','back','both']},mapping:{type:'object',additionalProperties:{type:'string'}}},['template']),
+  'template.create':obj({template:S.str,name:S.str,theme:S.str,preset:S.preset,side:{type:'string',enum:['front','back','both']}},['template']),
+  'template.apply':obj({template:S.str,deck:S.deck,theme:S.str,preset:S.preset,side:{type:'string',enum:['front','back','both']},mapping:{type:'object',additionalProperties:{type:'string'}}},['template','deck']),
+  'template.save':obj({deck:S.deck,name:S.str},['deck','name']),
+  'layer.list': obj({deck:S.deck,side:S.side},['deck','side']),
+  'layer.manage': obj({deck:S.deck,side:S.side,operation:{type:'string',enum:['front','back','up','down','above','below','order','rename','renameGroup','show','hide','lock','unlock','group','ungroup']},ids:{type:'array',items:S.str},target:S.str,name:S.str,order:{type:'array',items:S.str},expandGroups:S.bool},['deck','side','operation','ids']),
   'element.list': obj({ deck: S.deck, side: S.side }, ['deck', 'side']),
   'element.add': obj({
-    deck: S.deck, side: S.side, kind: S.elemKind,
+    deck: S.deck, side: S.side, kind: S.elemKind, shape: S.str, shapePath: S.str,
     x: S.num, y: S.num, width: S.num, height: S.num,
     name: S.str, fieldId: S.str, text: S.str, fill: S.str, color: S.str,
     fontSize: S.num, fontFamily: S.str, richText: S.bool,
@@ -215,7 +242,7 @@ export const TOOL_PARAMS: Record<string, Record<string, unknown>> = {
   }, ['deck', 'side', 'element']),
   'element.countExpand': obj({
     deck: S.deck, side: S.side, element: S.element,
-    fieldId: S.str, max: S.num, spacing: S.num, direction: S.dir,
+    fieldId: S.str, max: S.num, spacing: S.num, direction: S.dir, slotsField: S.str, slots: S.num, half: S.bool, clear:S.bool,
   }, ['deck', 'side', 'element']),
   'element.delete': obj({ deck: S.deck, side: S.side, element: S.element }, ['deck', 'side', 'element']),
   'layout.setBackground': obj({ deck: S.deck, side: S.side, color: S.str, assetId: S.str }, ['deck', 'side']),
@@ -256,6 +283,7 @@ export const TOOL_PARAMS: Record<string, Record<string, unknown>> = {
   'doc.tableDeleteRow': obj({ doc: S.doc, row: S.num }, ['doc', 'row']),
   'doc.tableToCards': obj({ doc: S.doc, deck: S.deck, mode: { type: 'string', enum: ['append', 'replace'] } }, ['doc', 'deck']),
   'web.search': obj({ query: S.str, maxResults: S.num }, ['query']),
+  'web.research': obj({ query: S.str, maxPages: S.num }, ['query']),
   'web.fetch': obj({ url: S.str, offset: S.num, limit: S.num, maxChars: S.num }, ['url']),
   'todo.write': obj({ items: arr(obj({ text: S.str, status: { type: 'string', enum: ['pending', 'in_progress', 'done'] } }, ['text', 'status'])) }, ['items']),
 };
@@ -270,9 +298,9 @@ export const toWireName = (internal: string): string => internal.replace(/\./g, 
 
 const WIRE_TO_INTERNAL = new Map<string, string>(TOOL_NAMES.map((n) => [toWireName(n), n]));
 
-export function buildToolDefinitions(extra: ToolDefinition[] = []): ToolDefinition[] {
+export function buildToolDefinitions(extra: ToolDefinition[] = [], web = true): ToolDefinition[] {
   return [
-    ...TOOL_SPECS.map((s) => ({
+    ...TOOL_SPECS.filter((s) => web || !s.name.startsWith('web.')).map((s) => ({
       type: 'function' as const,
       function: {
         name: toWireName(s.name),
@@ -350,7 +378,7 @@ export function buildSystemPrompt(snapshotOrParts: string | PromptParts): string
     ? []
     : [
         '## 可用工具',
-        ...specs.map((s) => `- ${s.doc}${s.level === 'destructive' ? '  ⚠️需用户确认' : ''}`),
+        ...specs.filter((s) => p.web !== false || !s.name.startsWith('web.')).map((s) => `- ${s.doc}${s.level === 'destructive' ? '  ⚠️需用户确认' : ''}`),
         '',
       ];
   const refBlock = (items: PromptRef[] | undefined, label: string, limit = maxRef): string[] => {
@@ -372,9 +400,11 @@ export function buildSystemPrompt(snapshotOrParts: string | PromptParts): string
       ]
     : [];
 
-  const webRules = p.web
+  const webRules = p.web !== false
     ? [
         '7. 需要外部事实时用 web.search 找到网址，再用 web.fetch 抓正文，不要凭记忆编造规则、尺寸、市面上的卡牌数据。',
+        '   天气、新闻等实时问题与其他调研一样，使用 web.search/web.research 找来源，再用 web.fetch 核对内容与更新时间。缺少查询地点时先询问，不得编造实时事实。',
+        '   用户要求网络调研时优先 web.research 完成搜索和多源正文读取，可继续多轮检索、交叉核对后附来源与日期；搜索摘要不等于已读正文。百科不能替代实时数据。',
         '   抓不到就如实说抓不到；引用网络内容时顺带给出来源网址。',
       ]
     : ['7. 当前未开放联网工具，不要调用 web.*；确实需要外部资料时请让用户开启。'];
@@ -392,10 +422,14 @@ export function buildSystemPrompt(snapshotOrParts: string | PromptParts): string
     '## 调用规则',
     ...rule1,
     '2. 只想解释、建议、回答问题时，正常用中文说话，不要输出 JSON。',
+    '   工具按需提供：需要的工具不在列表时先 tools.discover，用英文分类或精确名称检索加载；不要因未加载而宣称不具备能力。',
+    '   默认简短回答，先给结论；普通操作完成后 1–3 句即可，不复述工具名、参数、JSON 或完整执行日志。用户明确要求详细调研、说明时再展开。',
     '3. 工具参数里的牌组/字段/卡牌/元素定位都支持：id、名称、名称子串、序号（1 起）。不确定就先调用 project.overview 或对应的 list。',
     '4. 改完工程后我会把每条动作的执行结果回传给你，你再用一句简短的中文告诉用户做了什么；失败就说明原因并重试一次。',
     '5. 不要臆造不存在的 id；不要一次改动超过必要范围；带 ⚠️ 的删除类工具用户明确要求才用。',
+    '   矢量路径使用 element.add kind=path，shapePath 为 SVG d 字符串，采用 0–100 坐标；后续可用 element.update 修改 shapePath、填充和描边。',
     '6. 坐标单位是 300DPI 下的像素，牌面默认 750×1050；元素 x/y 是左上角。',
+    '   新增形状用 element.add，kind=rectangle，shape 可选 rectangle/rounded/ellipse/circle/line/triangle/diamond/pentagon/hexagon/star/arrow/trapezoid。圆形请设相同宽高。',
     ...webRules,
     '8. 多步骤任务先用 todo.write 列计划，每完成一步就更新状态，不要一次性闷头做完。',
     '   分批写入：每轮动作总数最多 8 个（版式元素一次最多 4 个）、每轮最多 10 条卡牌；先看执行结果再写下一批。',
@@ -818,6 +852,7 @@ export interface ToolRecord {
 
 /** Destructiveness depends on arguments as well as tool names. */
 export function callLevel(call: ToolCall): ToolLevel {
+  if(call.tool==='design.execute'&&['component.reset','style.reset'].includes(String(call.args.operation)))return 'destructive';
   if (call.tool === 'doc.tableToCards' && String(call.args?.mode ?? '').trim() === 'replace') return 'destructive';
   return levelOf(call.tool);
 }
@@ -829,7 +864,7 @@ export function callKey(call: ToolCall): string {
 }
 
 const REPLAY_PROTECTED = new Set([
-  'deck.create', 'deck.duplicate', 'field.add', 'card.add', 'card.addMany',
+  'design.execute', 'template.create', 'template.save', 'deck.create', 'deck.duplicate', 'field.add', 'card.add', 'card.addMany',
   'card.duplicate', 'element.add', 'doc.create', 'doc.createTable', 'doc.append',
   'doc.tableAddRow', 'doc.tableAddColumn', 'doc.tableToCards',
 ]);
@@ -889,7 +924,10 @@ export async function runToolCalls(
     const fn = actions[c.tool];
     if (!fn) return record(c, 'error', `❌ ${c.tool}：未知工具。可用工具：${TOOL_NAMES.join('、')}`);
     const key = callKey(c);
-    const previous = REPLAY_PROTECTED.has(c.tool) ? opts.journal?.get(key) : undefined;
+    const designArgs=(c.args.args??{}) as Record<string,unknown>;
+    const designOperation=String(c.args.operation);
+    const protectedCall = REPLAY_PROTECTED.has(c.tool) && (c.tool!=='design.execute'||['skill.create','component.insert','text.snippet.save','text.snippet.insert'].includes(designOperation)||(designOperation==='style.save'&&!designArgs.style)||(designOperation==='component.save'&&!designArgs.component));
+    const previous = protectedCall ? opts.journal?.get(key) : undefined;
     if (previous !== undefined) return record(c, 'replayed', `↪ 已执行，未重复写入：${previous}`);
     try {
       await opts.beforeCall?.(c);
@@ -905,7 +943,7 @@ export async function runToolCalls(
         } catch { result += "\n⚠️ 完整结果保存失败；原工具已返回，不要因此重复写操作。"; }
       }
       const failed = raw.trimStart().startsWith('❌');
-      if (!failed && REPLAY_PROTECTED.has(c.tool)) opts.journal?.set(key, result);
+      if (!failed && protectedCall) opts.journal?.set(key, result);
       return record(c, failed ? 'error' : 'success', result);
     } catch (e) {
       if ((e as Error).name === 'AbortError') throw e;

@@ -17,7 +17,7 @@ export class ApiError extends Error {
   }
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+export async function req<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, {
@@ -117,9 +117,10 @@ export const api = {
     req<ProjectDTO>(`/projects/${projectId}/versions/${versionId}/restore`, { method: 'POST' }),
 
   /* ---------- 素材 ---------- */
-  listAssets: (projectId: string, folderId?: string | null, kind?: string) =>
+  listAssets: (projectId: string, folderId?: string | null, kind?: string, signal?: AbortSignal) =>
     req<{ items: RemoteAssetDTO[] }>(
       `/assets${qs({ project_id: projectId, folder_id: folderId ?? undefined, kind })}`,
+      { signal },
     ),
   getAsset: (id: string) => req<RemoteAssetDTO>(`/assets/${id}`),
   renameAsset: (id: string, name: string) =>
@@ -221,6 +222,8 @@ export const api = {
     req<{ models: string[]; metadata?: unknown[] }>('/llm/models', { method: 'POST', body: JSON.stringify(body) }),
 
   /* ---------- 联网（后端代跑，绕开浏览器跨域）---------- */
+  webResearch: (body: { query: string; provider?: string; api_key?: string; max_pages?: number }, signal?: AbortSignal) =>
+    req<Record<string, unknown>>('/web/research', { method: 'POST', body: JSON.stringify(body), signal }),
   webSearch: (body: { query: string; provider?: string; api_key?: string; max_results?: number; lang?: string }, signal?: AbortSignal) =>
     req<WebSearchItem[]>('/web/search', { method: 'POST', body: JSON.stringify(body), signal }),
   webFetch: (body: { url: string; max_chars?: number }, signal?: AbortSignal) =>

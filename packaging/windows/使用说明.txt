@@ -1,0 +1,54 @@
+CardArts Windows x64 便携桌面版
+构建日期：2026-11-11
+
+启动
+1. 将 ZIP 完整解压到一个固定目录。
+2. 双击 CardArts.exe。无需安装 Python、Node.js 或另开后端。
+3. 必须保留 EXE 旁的 _internal 文件夹；不能只复制 EXE。
+4. 程序使用 Microsoft Edge WebView2 Runtime，本机验收环境已具备。
+   若其他电脑缺少该组件，请从微软官方安装 WebView2 Runtime。
+   下载页面：https://developer.microsoft.com/microsoft-edge/webview2/
+
+退出
+关闭 CardArts 窗口后，本机服务会随之停止。不要用旧开发版 stop.bat
+关闭本版本；它使用独立端口。不要同时启动多个相同数据目录的实例。
+
+数据目录（默认）
+%LOCALAPPDATA%\CardArts\data\card_arts.db     后端数据库
+%LOCALAPPDATA%\CardArts\data\objects\         服务端素材
+%LOCALAPPDATA%\CardArts\data\uploads\         上传临时文件
+%LOCALAPPDATA%\CardArts\data\logs\desktop.log  滚动日志
+%LOCALAPPDATA%\CardArts\data\desktop.json      固定端口配置
+%LOCALAPPDATA%\CardArts\webview\              WebView2 用户数据
+
+WebView2 目录包含 IndexedDB 项目、缓存和模型设置等浏览器数据。
+首次启动分配端口，后续复用。不要随意删除 desktop.json 或 webview，
+否则已有浏览器项目可能暂时看不到。若设置 CARDARTS_DATA_DIR，后端
+使用指定目录，WebView2 目录位于其父目录下的 webview。
+
+你的工作区
+用户手动连接的工作区是另一个真实文件夹，包含 cardarts.json、projects/、
+assets/ 等，不是上述后端 data 目录。打开已有工作区会先尝试恢复，确认
+项目列表正确后再点“立即落盘”开启写回。迁移前请先复制一份完整备份。
+桌面版的浏览器存储与原 Chrome/Edge 的 5173 页面不共用，不会自动搬家。
+
+Agent 文件操作
+在项目“设置 → 本机文件访问”中选择授权文件夹。可选择只读或可写，
+授权在程序重启后失效。Agent 使用 files.roots / files.execute，不能自行
+授权整个磁盘。只支持指定目录内的基础文件操作，禁止覆盖、删除和执行。
+
+程序包内容
+包含前端、Python 运行时及依赖、本机服务、内置图标与文档。
+不包含个人工程、上传素材、模型密钥或本机 .env。
+完整手册位于 _internal/docs/CardArts完整使用手册.md。
+内置图标授权与作者列表位于 _internal/data/game-icons/LICENSE.txt。
+
+更新
+关闭应用后可替换整个程序文件夹，保留上述用户数据目录。
+升级和批量修改前建议使用导出中心备份工程及素材。
+
+已验收
+Windows 11 x64 / WebView2 环境下原生窗口与首页启动、会话引导、
+关闭窗口后的服务正常退出；后端文件认证与路径边界另有回归测试。
+未在完全空白的新电脑验证运行时安装；打印、所有字体和模型提供商没有
+逐一做完整桌面端验收。本包未进行代码签名。

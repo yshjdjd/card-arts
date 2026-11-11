@@ -1,3 +1,4 @@
+import {createToolRouter} from '../lib/toolRouting';
 import { resolveCapacity, autoCompactThreshold } from '../lib/modelCapacity';
 import React, { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
@@ -13,6 +14,7 @@ import { fetchRemoteTools } from '../lib/mcp';
 import type { ChatSession, LLMConfig } from '../lib/types';
 
 type Snapshot = {messages:AgentMessage[];tools:unknown[];model:string;createdAt:string;window:number;outputTokens:number;
+  taskUsage?:{requests:number;reported:number;prompt_tokens:number;completion_tokens:number;total_tokens:number};
   usage?:{prompt_tokens?:number;completion_tokens?:number;total_tokens?:number}};
 
 export function ContextDashboard({chat,cfg,busy,input,buildPrompt}:{chat:ChatSession|null|undefined;cfg:LLMConfig|null|undefined;busy:boolean;input:string;buildPrompt:()=>Promise<string>}) {
@@ -46,7 +48,7 @@ export function ContextDashboard({chat,cfg,busy,input,buildPrompt}:{chat:ChatSes
     const current=await hydrateAgentItems((await db.chats.get(chat.id))!);
     const index=current.summary?current.messages.findIndex(m=>m.id===current.summary!.throughMessageId):-1;
     const remote=await fetchRemoteTools(signal);
-    const definitions=buildToolDefinitions(remote.defs);
+    const definitions=createToolRouter(input,remote.defs,current.context?.web!==false).definitions();
     const outputTokens=resolveOutputBudget(cfg,model).value;
     const result=selectContext(await buildPrompt(),restoreHistory(current.messages.slice(index+1)),input.trim()?[{role:'user',content:input.trim()}]:[],resolveCapacity(cfg,model).tokens,outputTokens+contextTokens(JSON.stringify(definitions)));
     if(signal.aborted)return;
@@ -94,6 +96,7 @@ export function ContextDashboard({chat,cfg,busy,input,buildPrompt}:{chat:ChatSes
       </tbody></table>
       <div className="small faint">{source==='preview'?`预算移出 ${removed} 条历史；原文仍可查询。`:'仅显示最近一次模型请求，不含摘要请求。'} 所有估算均非计费数据。</div>
       <div className="small">服务商真实用量：{snapshot.usage?`输入 ${snapshot.usage.prompt_tokens??'未返回'} / 输出 ${snapshot.usage.completion_tokens??'未返回'} / 合计 ${snapshot.usage.total_tokens??'未返回'}`:'服务商未返回'}</div>
+      {snapshot.taskUsage&&<div className="small">本次任务累计（已完成模型请求，不含摘要请求）：{snapshot.taskUsage.requests} 次请求，{snapshot.taskUsage.reported} 次返回用量；已报告输入 {snapshot.taskUsage.prompt_tokens.toLocaleString()} / 输出 {snapshot.taskUsage.completion_tokens.toLocaleString()} / 合计 {snapshot.taskUsage.total_tokens.toLocaleString()}。未报告部分不计入，不代表用量为零。</div>}
       <details className="small mt8"><summary>查看请求消息与工具定义</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:300,overflow:'auto'}}>{JSON.stringify({messages:snapshot.messages,tools:snapshot.tools},null,2)}</pre></details>
     </>}
     <div className="small mt8">

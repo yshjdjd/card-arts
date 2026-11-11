@@ -1,3 +1,9 @@
+import { designCommand, designCatalog } from './designCommands';
+import {localFiles} from './localFiles';
+import { shapeProperties } from './shapes';
+import { anchorElement, markOverrides, validateDesignPatch } from './designSystem';
+import { allCardTemplates, instantiateTemplate, captureTemplate, type TemplateOptions } from './cardTemplates';
+import { applyLayers, listLayers, type LayerCommand } from './layers';
 /**
  * 项目内 AI 助手的「工具箱」。
  *
@@ -70,21 +76,31 @@ const ASSET_TTL = 20_000;
 
 export async function listProjectAssets(
   ctx: { projectId: string },
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<AgentAsset[]> {
+  opts.signal?.throwIfAborted();
   const cached = assetCache.get(ctx.projectId);
   if (!opts.force && cached && Date.now() - cached.at < ASSET_TTL) return cached.items;
 
   const local = await db.projects.get(ctx.projectId);
   const remoteId = local?.remoteId ?? ctx.projectId;
   let items: AgentAsset[] = [];
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  opts.signal?.throwIfAborted();
+  opts.signal?.addEventListener('abort', abort, { once: true });
+  const timeout = setTimeout(abort, opts.timeoutMs ?? 8000);
   try {
-    const r = await api.listAssets(remoteId);
+    const r = await api.listAssets(remoteId, undefined, undefined, controller.signal);
     items = (r.items ?? []).map((a) => ({
       id: a.id, name: a.name, kind: a.kind, mime: a.mime, size: a.size ?? 0, url: a.url,
     }));
   } catch {
+    opts.signal?.throwIfAborted();
     items = [];
+  } finally {
+    clearTimeout(timeout);
+    opts.signal?.removeEventListener('abort', abort);
   }
   if (!items.length) {
     // 离线或还没推过服务端：用本地那份（含尚未同步的）
@@ -128,8 +144,8 @@ export function formatAssets(assets: AgentAsset[], limit: number): string {
   return lines.join('\n');
 }
 
-async function describeAssets(ctx: { projectId: string }, limit: number): Promise<string> {
-  const assets = await listProjectAssets(ctx);
+async function describeAssets(ctx: { projectId: string }, limit: number, signal?: AbortSignal): Promise<string> {
+  const assets = await listProjectAssets(ctx, { signal });
   const images = assets.filter((a) => a.kind === 'image');
   const fonts = assets.filter((a) => a.kind === 'font');
   if (!assets.length) return `【素材】图 ${images.length} 个 / 字体 ${fonts.length} 个 —— ${formatAssets(assets, limit)}`;
@@ -272,6 +288,10 @@ function resolveFieldId(deck: Deck, key: string): string | undefined {
 }
 
 const ELEMENT_PATCH_KEYS = [
+  'countSlotsFieldId',
+  'countSlots', 'countHalf', 'countEmptyOpacity',
+  'textureAssetId', 'textureMode', 'textureScale',
+  'writingMode', 'shapePath', 'pathViewBox',
   'name', 'x', 'y', 'width', 'height', 'rotation',
   'fill', 'color', 'fillOpacity', 'textOpacity', 'borderOpacity',
   'borderColor', 'borderWidth', 'borderStyle', 'borderRadius',
@@ -280,6 +300,7 @@ const ELEMENT_PATCH_KEYS = [
   'lineHeight', 'letterSpacing', 'wrapMode',
   'horizontalAlign', 'verticalAlign', 'imageFit', 'assetId', 'iconId',
   'imageZoom', 'imageFocusX', 'imageFocusY', 'richText', 'groupId',
+  'padding','paragraphSpacing','firstLineIndent','inlineIconScale','inlineIconOffset','gradient','shadow','imageMask','maskPath','blendMode',
   'locked', 'hidden', 'countFieldId', 'countMax', 'countSpacing', 'countDirection',
 ] as const;
 
@@ -363,7 +384,12 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
       const eid = el.id;
       const target = (layout.elements ?? []).find((x) => x.id === eid);
       if (!target) return '❌ 元素已不存在';
-      return fn(target, layout, deck);
+      const before=structuredClone(target);
+      const result=fn(target,layout,deck);
+      const patch=Object.fromEntries(Object.entries(target).filter(([k,v])=>JSON.stringify(v)!==JSON.stringify((before as any)[k])));
+      markOverrides(target,patch);
+      if(target.anchors&&['x','y','width','height'].some(k=>k in patch))target.anchors=anchorElement(layout,target,target.anchors.horizontal,target.anchors.vertical);
+      return result;
     }, false);
   }
 
@@ -387,10 +413,18 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
   }
 
   const A: AgentActions = {};
+  A['files.roots']=async()=>JSON.stringify(await localFiles.roots());
+  A['files.execute']=async(a,signal)=>{
+    const project=await db.projects.get(ctx.projectId);
+    const result=await localFiles.execute({grant:norm(a.grant),path:norm(a.path),operation:norm(a.operation),target:norm(a.target),text:String(a.text??''),project_id:project?.remoteId??ctx.projectId},signal);
+    if(a.operation==='import')invalidateAssets(ctx.projectId);
+    return JSON.stringify(result);
+  };
+  A['tools.discover']=async()=> '工具发现由会话运行器提供；请在 Agent 会话中调用，使用 query 分类或 names 精确工具名。';
 
   /* ---------------- 项目 ---------------- */
 
-  A['project.overview'] = async () => projectOverview(ctx);
+  A['project.overview'] = async (_a, signal) => projectOverview(ctx, signal);
 
   A['project.rename'] = async (a) => {
     const name = norm(a.name);
@@ -818,6 +852,55 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
 
   /* ---------------- 版式与元素 ---------------- */
 
+  A['design.catalog']=async()=>JSON.stringify(designCatalog(await freshContent(ctx.projectId)));
+  A['design.execute']=async(a)=>{
+    if(a.side!=='front'&&a.side!=='back')return '❌ side 必须为 front/back';
+    return withDeck(a.deck,'精细设计',(d,c)=>{
+      const result=designCommand(c,d.id,String(a.side),String(a.operation),((a.args&&typeof a.args==='object')?a.args:{}) as Record<string,unknown>,uid);
+      return '✅ '+JSON.stringify(result);
+    });
+  };
+  A['design.preflight']=async(a,signal)=>{
+    const c=await freshContent(ctx.projectId);const d=pickDeck(c,a.deck);if(!d)return '❌ 找不到牌组';
+    if(a.side!=='front'&&a.side!=='back')return '❌ side 必须为 front/back';
+    const {preflightProject}=await import('./designPreflight');
+    return JSON.stringify(await preflightProject(c,d,a.side,await listProjectAssets(ctx),signal));
+  };
+
+  const templateOptions=(a:Record<string,unknown>,c:ProjectContent):TemplateOptions=>({theme:a.theme as string|undefined,preset:a.preset as string|undefined,side:(a.side??'both') as TemplateOptions['side'],mapping:a.mapping as Record<string,string>|undefined,font:typeof c.settings?.defaultFont==='string'?c.settings.defaultFont:undefined});
+  const resolveTemplate=(c:ProjectContent,hint:unknown)=>{
+    const key=norm(hint);const choices=allCardTemplates(c);const exact=choices.find(t=>t.id===key);if(exact)return exact;
+    const names=choices.filter(t=>t.name===key);if(names.length!==1)throw new Error('模板不存在或名称不唯一，请先 template.list 使用真实 id');return names[0];
+  };
+  A['template.list']=async(a)=>{const c=await freshContent(ctx.projectId);return JSON.stringify(allCardTemplates(c).filter(t=>!a.query||`${t.name} ${t.category} ${t.tags.join(' ')}`.toLowerCase().includes(norm(a.query).toLowerCase())).map(t=>({id:t.id,name:t.name,category:t.category,description:t.description,custom:!!t.custom,fields:t.fields.map(f=>({id:f.id,name:f.name,type:f.type}))})));};
+  A['template.inspect']=async(a)=>{
+    const c=await freshContent(ctx.projectId),template=resolveTemplate(c,a.template);
+    const base=a.deck?pickDeck(c,a.deck):{id:'preview',name:template.name,fields:defaultFields(),cards:[],frontLayout:null,backLayout:null};
+    if(!base)return '❌ 找不到牌组';let n=0;const result=instantiateTemplate(template,base,templateOptions(a,c),()=>`preview-${++n}`);
+    return JSON.stringify({template:template.id,addedFields:result.added,bindings:result.bindings,front:result.deck.frontLayout,back:result.deck.backLayout,notice:'只读预览；应用到现有牌组会替换对应版式，请确认。'});
+  };
+  A['template.create']=async(a)=>{
+    const current=await freshContent(ctx.projectId);const template=resolveTemplate(current,a.template);let created='';
+    await ctx.update(c=>{const deck:Deck={id:uid(),name:norm(a.name)||template.name,fields:defaultFields(),cards:[],frontLayout:null,backLayout:null,useSharedBack:true};
+      const result=instantiateTemplate(resolveTemplate(c,template.id),deck,templateOptions(a,c),uid);c.decks.push(result.deck);created=deck.id;
+    },'智能体：模板新建牌组');return `✅ 模板牌组已创建 id=${created}，卡牌数据为空，可用 card.add 写入`;
+  };
+  A['template.apply']=(a)=>withDeck(a.deck,'应用版式模板',(d,c)=>{const result=instantiateTemplate(resolveTemplate(c,a.template),d,templateOptions(a,c),uid);Object.assign(d,result.deck);return `✅ 已应用模板；新增字段：${result.added.map(f=>f.name).join('、')||'无'}，卡牌数据保留`;});
+  A['template.save']=(a)=>withDeck(a.deck,'保存项目模板',(d,c)=>{const template=captureTemplate(c,d,norm(a.name),uid);(c.settings??={}).cardTemplates=[...allCardTemplates(c).filter(t=>t.custom),template];return `✅ 已保存项目模板 ${template.name} [id=${template.id}]`;});
+
+  A['layer.list'] = async (a) => {
+    if(a.side!=='front'&&a.side!=='back')return '❌ side 必须为 front/back';
+    const c=await freshContent(ctx.projectId);const d=pickDeck(c,a.deck);
+    if(!d)return '❌ 找不到牌组';
+    return JSON.stringify(listLayers((a.side==='front'?d.frontLayout:d.backLayout)?.elements??[]));
+  };
+  A['layer.manage'] = async (a) => {
+    if(a.side!=='front'&&a.side!=='back')return '❌ side 必须为 front/back';
+    if(!Array.isArray(a.ids)||!a.ids.every(id=>typeof id==='string'))return '❌ ids 必须是图层 ID 数组';
+    return withLayout(a.deck,a.side,'管理图层',l=>{
+      l.elements=applyLayers(l.elements,{operation:a.operation,ids:a.ids,target:a.target,name:a.name,order:a.order,expandGroups:a.expandGroups,groupId:uid()} as LayerCommand);
+    },false);
+  };
   A['element.list'] = async (a) => {
     const c = await freshContent(ctx.projectId);
     const d = pickDeck(c, a.deck);
@@ -837,7 +920,7 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
 
   A['element.add'] = (a) => withLayout(a.deck, a.side, '新增元素', (layout, deck, current) => {
     const kind = norm(a.kind) || 'text';
-    if (!['text', 'image', 'icon', 'rectangle', 'ellipse', 'line'].includes(kind)) {
+    if (!['text', 'image', 'icon', 'rectangle', 'ellipse', 'line', 'path'].includes(kind)) {
       return `❌ kind 必须是 text/image/icon/rectangle/ellipse/line 之一`;
     }
     const name = norm(a.name) || `${kind === 'text' ? '文本' : kind === 'rectangle' ? '矩形' : kind === 'ellipse' ? '圆形' : kind === 'icon' ? '图标' : kind === 'image' ? '图片' : '线条'} ${(layout.elements?.length ?? 0) + 1}`;
@@ -853,10 +936,12 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
       fill: norm(a.fill) || (kind === 'text' || kind === 'line' ? 'transparent' : '#ffffff'),
       color: norm(a.color) || '#18181b',
     };
+    if(kind === 'path'){el.shapePath=norm(a.shapePath)||'M10 80 C10 10 90 10 90 80 Z';el.borderColor=norm(a.borderColor)||'#111827';el.borderWidth=num(a.borderWidth,2);}
     if (kind === 'rectangle' || kind === 'ellipse') {
+      if(a.shape) { const preset=shapeProperties(norm(a.shape)); Object.assign(el,preset,{width:el.width,height:el.height,name:norm(a.name)||preset.name}); }
       el.borderColor = norm(a.borderColor) || '#e5e7eb';
       el.borderWidth = num(a.borderWidth, 1);
-      el.borderRadius = num(a.borderRadius, kind === 'ellipse' ? Math.min(el.width, el.height) / 2 : 8);
+      el.borderRadius = num(a.borderRadius, el.borderRadius ?? (kind === 'ellipse' ? Math.min(el.width, el.height) / 2 : 8));
     }
     if (kind === 'text' || kind === 'icon') {
       el.fontSize = num(a.fontSize, 32);
@@ -883,6 +968,8 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
 
   A['element.update'] = (a) => withElement(a.deck, a.side, a.element, '改元素', (el, _layout, deck) => {
     const src = (a.patch && typeof a.patch === 'object' ? a.patch : a) as Record<string, unknown>;
+    validateDesignPatch(src as Partial<LayoutElement>);
+    for(const key of ['countFieldId','countSlotsFieldId'] as const)if(src[key]){const fid=resolveFieldId(deck,norm(src[key]));if(!fid||!deck.fields.some(f=>f.id===fid&&f.type==='number'))return '❌ 数量与总格数必须绑定真实数字字段';src[key]=fid;}
     const keys = Object.keys(src).filter((k) => !['deck', 'side', 'element', 'tool', 'patch'].includes(k));
     const bad = keys.filter((k) => !(ELEMENT_PATCH_KEYS as readonly string[]).includes(k));
     const changed: string[] = [];
@@ -980,12 +1067,20 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
 
   A['element.countExpand'] = (a) => withElement(a.deck, a.side, a.element, '设数量展开', (el, _l, deck) => {
     if (bool(a.clear, false)) {
+      delete el.countSlotsFieldId;delete el.countSlots;delete el.countHalf;delete el.countEmptyOpacity;
       delete el.countFieldId; delete el.countMax; delete el.countSpacing; delete el.countDirection;
       return `✅ 已清除「${el.name}」的数量展开`;
     }
     const fid = resolveFieldId(deck, norm(a.fieldId ?? a.field ?? 'count'));
     if (!fid) return `❌ 找不到字段「${norm(a.fieldId ?? a.field ?? 'count')}」。现有：${(deck.fields ?? []).map((f) => f.name).join('、')}`;
+    const total=a.slotsField!==undefined?resolveFieldId(deck,norm(a.slotsField)):undefined;
+    if(a.slotsField&&!total)return '❌ 找不到体力上限字段';
+    if(total&&!deck.fields.some(f=>f.id===total&&f.type==='number'))return '❌ 体力上限必须绑定数字字段';
+    if(!deck.fields.some(f=>f.id===fid&&f.type==='number'))return '❌ 数量必须绑定数字字段';
     el.countFieldId = fid;
+    if(a.slotsField!==undefined)el.countSlotsFieldId=total;
+    if(a.slots!==undefined)el.countSlots=Math.max(0,Math.min(100,Math.floor(num(a.slots,0))));
+    if(a.half!==undefined)el.countHalf=bool(a.half);
     if (a.max !== undefined) el.countMax = Math.max(1, num(a.max, 10));
     if (a.spacing !== undefined) el.countSpacing = num(a.spacing, 8);
     if (a.direction !== undefined) el.countDirection = norm(a.direction) === 'vertical' ? 'vertical' : 'horizontal';
@@ -1128,7 +1223,7 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
     }
     if (a.element && targets.length !== 1) return '❌ 元素定位不唯一或不是文字，请指定正面/背面和精确元素 id';
     await ctx.update((c) => {
-      for (const t of targets) { const e = c.decks.find((d) => d.id === t.deck)?.[t.side]?.elements.find((e) => e.id === t.id); if (e) e.fontFamily = font.id; }
+      for (const t of targets) { const e = c.decks.find((d) => d.id === t.deck)?.[t.side]?.elements.find((e) => e.id === t.id); if (e) {markOverrides(e,{fontFamily:font.id});e.fontFamily = font.id;} }
       if (a.setDefault === true) (c.settings ??= {}).defaultFont = font.id;
     }, '智能体：设定字体');
     return `✅ 已将 ${targets.length} 个文字元素设为「${font.name}」${a.setDefault === true ? '，同时更新默认字体' : ''}`;
@@ -1419,6 +1514,20 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
 
   /* ---------------- 联网 ---------------- */
 
+  A['web.research'] = async (a, signal) => {
+    if (ctx.web === false) return '❌ 本会话未开启联网。让用户在「上下文」里打开联网开关。';
+    const query = norm(a.query);
+    if (!query) return '❌ 缺少 query';
+    try {
+      const result = await api.webResearch({ query, provider: ctx.webProvider || 'auto', api_key: ctx.webApiKey || '',
+        max_pages: Math.max(1, Math.min(5, Math.floor(num(a.maxPages, 3)))) }, signal);
+      return (result.status === 'failed' ? '❌ 所有网页正文读取失败；以下仅为搜索摘要和错误，不可声称已读正文。\n' : '') + JSON.stringify(result);
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') throw e;
+      return `❌ 网络调研失败：${(e as Error).message ?? e}`;
+    }
+  };
+
   A['web.search'] = async (a, signal) => {
     if (ctx.web === false) return '❌ 本会话未开启联网。让用户在「上下文」里打开联网开关。';
     const query = norm(a.query ?? a.q);
@@ -1431,8 +1540,8 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
         max_results: Math.max(1, Math.min(20, num(a.maxResults ?? a.n, 8))),
         lang: norm(a.lang) || 'zh',
       }, signal);
-      if (!items.length) return '搜索没有返回结果（可能是网络不通或搜索引擎拒绝），可以换关键词或改用 web.fetch 直接抓已知网址。';
-      return items.map((x, i) => `${i + 1}. ${x.title}\n   ${x.url}\n   ${x.snippet}`).join('\n');
+      if (!items.length) return '❌ 搜索没有返回结果。可能是关键词无匹配或搜索引擎限制；可换关键词、配置 Tavily/Brave/Serper，或用 web.fetch 抓取已知网址。天气等实时问题请搜索并读取可靠来源。';
+      return `检索时间：${new Date().toISOString()}\n` + items.map((x, i) => `${i + 1}. ${x.title} [${x.source || '未知来源'}]\n   ${x.url}\n   ${x.snippet}`).join('\n');
     } catch (e) {
       if ((e as Error).name === 'AbortError') throw e;
       return `❌ 搜索失败：${(e as Error).message ?? e}`;
@@ -1479,7 +1588,7 @@ export function createAgentActions(ctx: AgentCtx): AgentActions {
 /* 项目快照（喂给模型，让它拿到真实的 id）                                */
 /* ------------------------------------------------------------------ */
 
-export async function projectOverview(ctx: AgentCtx): Promise<string> {
+export async function projectOverview(ctx: AgentCtx, signal?: AbortSignal, brief=false): Promise<string> {
   const c = await freshContent(ctx.projectId);
   const decks = c.decks ?? [];
   const cards = decks.reduce((n, d) => n + (d.cards?.length ?? 0), 0);
@@ -1493,6 +1602,7 @@ export async function projectOverview(ctx: AgentCtx): Promise<string> {
     `导出设置：${JSON.stringify(c.settings?.export ?? {})}`,
     '',
   ];
+  if(brief)return lines.concat(decks.map(d=>`牌组「${d.name}」ID=${d.id}，${d.fields.length}字段，${d.cards.length}卡；正面${d.frontLayout?.elements.length??0}层，背面${d.backLayout?.elements.length??0}层`),'这里只是工程索引；字段、卡牌、图层、素材和字体详情请按需查询，不可猜测ID。').join('\n');
   for (const d of decks) {
     lines.push(`【牌组 ${d.name}】id=${d.id}`);
     lines.push(`  字段：${(d.fields ?? []).map((f) => {
@@ -1528,7 +1638,7 @@ export async function projectOverview(ctx: AgentCtx): Promise<string> {
     lines.push(`【文档】${c.documents.map((d) => `${d.kind === 'table' ? '📊表格' : '📝文本'} ${d.title}(${d.id})`).join('、')}`);
   }
   // 素材：不列出来的话模型根本不知道库里有什么图，只能凭空编 assetId
-  const assetLine = await describeAssets(ctx, 8);
+  const assetLine = await describeAssets(ctx, 8, signal);
   if (assetLine) lines.push(assetLine);
   return lines.join('\n').trim();
 }

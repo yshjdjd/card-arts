@@ -15,6 +15,7 @@ export function collectRefs(layouts: (Layout | null | undefined)[], cards: Card[
     if (!l) continue;
     if (l.backgroundAssetId) assets.add(l.backgroundAssetId);
     for (const el of l.elements ?? []) {
+      if(el.textureAssetId)assets.add(el.textureAssetId);
       if (el.kind === 'image' && el.assetId) assets.add(el.assetId);
       if (el.kind === 'image' && el.fieldId) for (const card of cards) { const id = card.values[el.fieldId]; if (typeof id === 'string' && id) assets.add(id); }
       if (el.kind === 'icon' && el.fieldId) for (const option of Object.values(fields.find((f) => f.id === el.fieldId)?.optionIcons || {})) icons.add(option.id);
@@ -28,7 +29,7 @@ export function collectRefs(layouts: (Layout | null | undefined)[], cards: Card[
   return { assets: [...assets], icons: [...icons] };
 }
 
-async function loadImage(url: string, svg = false): Promise<ImageLike | null> {
+export async function loadImage(url: string, svg = false): Promise<ImageLike | null> {
   const raster = svg ? await rasterizeSvg(url) : null;
   try { return await new Promise((resolve) => {
     const img = new Image();
